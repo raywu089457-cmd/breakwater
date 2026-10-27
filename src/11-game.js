@@ -7,11 +7,12 @@ const spawnMs = performance.now() - tSpawn;
 
 const fob = map.fob;
 const game = { tool: 'command', supType: 'artillery', ciws: true, pending: [], marks: [], beacons: [], survivors: [], shots: 0, fx: [], lost: 0 };
-const fxArr = new Float32Array(MAX_FX * 4);
+const fxArr = new Float32Array(MAX_FX * 8);
+// game.fx：[x, y, 寬, 開始時間, 高度（打在屋頂上的砲彈；沒有＝地面）]
 function buildFx() {
   game.fx = game.fx.filter((f) => sim.time - f[3] < 1.2);
-  game.fx.slice(-MAX_FX).forEach((f, k) => fxArr.set(f, k * 4));
-  return fxArr.subarray(0, Math.min(MAX_FX, game.fx.length) * 4);
+  game.fx.slice(-MAX_FX).forEach((f, k) => { fxArr.set(f.slice(0, 4), k * 8); fxArr[k * 8 + 4] = f[4] || 0; });
+  return fxArr.subarray(0, Math.min(MAX_FX, game.fx.length) * 8);
 }
 // 避難所位置（依離市中心遠近排序；測試用 survivors[0] 當屍潮聚集點）
 game.survivors = shelters.slice().sort((a, b) => Math.hypot(a.sx - map.downtown.x, a.sy - map.downtown.y) - Math.hypot(b.sx - map.downtown.x, b.sy - map.downtown.y)).map((d) => [d.sx, d.sy]);
@@ -91,11 +92,8 @@ function updateGame(dt) {
   const sdt = dt * sim.speed;
   for (const p of game.pending) p.t -= sdt;
   for (const p of game.pending.filter((p) => p.t <= 0)) {
-    sim.strikesOnce.push([p.x, p.y, p.r, 0.93]);
     game.marks.push({ type: 2, x: p.x, y: p.y, r: p.r * 1.1, life: 0.18, max: 0.18 });
-    game.fx.push([p.x, p.y, p.r * 1.9, sim.time]);
-    fxExplosion(p.x, p.y, p.r * 1.9);
-    game.marks.push({ type: 3, x: p.x, y: p.y, r: p.r * 0.8, life: 90, max: 90 });
+    detonate(p.x, p.y, p.r, 0.93);
   }
   game.pending = game.pending.filter((p) => p.t > 0);
   // 準星：直接操控時跟著滑鼠
@@ -284,7 +282,10 @@ $('regionName').textContent = `· ${REGION.name}（${CAMPAIGN.current + 1}/${REG
 // ----- 主迴圈 -----
 cam.x = fob.x; cam.y = fob.y + 140; cam.ppm = 6;
 let last = performance.now();
+// GPU 還有 3 幀沒做完就先跳過這次（不更新、不送新工作）：慢的 GPU（例如軟體算繪）不會越積越多、讀回的資料落後好幾秒
+let inFlight = 0;
 function loop(now) {
+  if (inFlight >= 3) { requestAnimationFrame(loop); return; }
   const dt = clamp((now - last) / 1000, 0, 0.1);   // rAF 時間戳可能早於初始化時的 performance.now()，第一幀會是負的
   last = now;
   fps = lerp(fps, 1 / Math.max(dt, 1e-4), 0.05);
@@ -294,6 +295,7 @@ function loop(now) {
   cam.x += shx; cam.y += shy;
   updateDistrictColors();
   encodeFrame(dt, buildMarks(dt), buildFx(), buildUnits());
+  inFlight++; device.queue.onSubmittedWorkDone().then(() => inFlight--, () => inFlight--);
   cam.x -= shx; cam.y -= shy;
   placeLabels();
   sfx.tick(dt);
@@ -318,7 +320,7 @@ window.GAME = {
     units: units.map((u) => ({ id: u.id, type: u.type, x: +u.x.toFixed(1), y: +u.y.toFixed(1), z: +u.z.toFixed(1), men: u.men, hp: +u.hp.toFixed(0), hang: u.hang, firing: u.firing })) }),
   view(x, y, ppm) { cam.x = x; cam.y = y; if (ppm) cam.ppm = ppm; return true; },
   debugRescue(n) { rescued += n; return rescued; },
-  findPath: (a, b, c, d) => findPath(a, b, c, d), tileAt: (x, y) => map.t[(y | 0) * WN + (x | 0)],
+  findPath: (a, b, c, d, r) => findPath(a, b, c, d, r), tileAt: (x, y) => map.t[(y | 0) * WN + (x | 0)],
   blockades, roadCandidates, get pathDangerCells() { let n = 0; for (const v of pathDanger) if (v > 0) n++; return n; },
   // 測試：Nexus 立刻挑某一類目標（預警時間可縮短）
   forceNexus(kind, warn = NEXUS_WARN) { const c = nexusCandidates().find((t) => t.kind === kind); if (!c) return null; Object.assign(nexus, { target: c, phase: 'warn', warnT: warn, t: 0 }); logEvent(`⚠ NEXUS 集結屍潮：${c.name}，約 ${warn} 分鐘後抵達`, 'bad'); return { name: c.name, x: c.x, y: c.y }; },
@@ -329,6 +331,22 @@ window.GAME = {
   op, endOperation, campaign: CAMPAIGN, region: REGION, regions: REGIONS, showCampaignMap, sprites: SPRITES, sfx, dayNight, nexus, nexusCandidates, districts, events, clockText, supply, outposts, get rescued() { return rescued; }, deploy, placeOutpost, orderAt, support, callSupport, setSupport, strike, addBeacon, setSpeed, setTool, setAlt: setAltSel, setAgents: (n) => setAgents(n),
   // 戰鬥特效（M16）：粒子數、殘骸數、某類地面標記數、這幀的單位實例數
   fx: { get particles() { return nParts; }, get wrecks() { return wrecks.length; }, marks: (type) => game.marks.filter((m) => m.type === type).length, get instances() { return game.unitInstances; }, maxParticles: MAX_PARTS, maxInstances: MAX_UNITS, explode: (x, y, size) => fxExplosion(x, y, size) },
+  // 碰撞與命中對齊（M17）
+  collide: { clearAt, roofAt, radius: (id) => { const u = unitById(id); return u ? unitRadius(u) : 0; }, UR, ray: rayHitBuilding, los: groundLos, perf: unitPerf, buildMs: () => clearanceMs,
+    // 所有地面單位離建築／牆／水最深穿進去多少（m；0＝沒穿）
+    penetration() { let w = 0; for (const u of units) { if (isAir(u)) continue; const r = UR[u.type]; for (let ty = Math.floor(u.y - r); ty <= Math.floor(u.y + r); ty++) for (let tx = Math.floor(u.x - r); tx <= Math.floor(u.x + r); tx++) { if (!hardAt(tx, ty)) continue; const d = Math.hypot(u.x - clamp(u.x, tx, tx + 1), u.y - clamp(u.y, ty, ty + 1)); w = Math.max(w, unitRadius(u) - d); } } return w; },
+    // 單位兩兩最深重疊多少（m）
+    overlap() { let w = 0; for (let i = 0; i < units.length; i++) for (let j = i + 1; j < units.length; j++) { const a = units[i], b = units[j]; if (isAir(a) !== isAir(b) || (isAir(a) && Math.abs(a.z - b.z) > 8)) continue; w = Math.max(w, unitRadius(a) + unitRadius(b) - Math.hypot(a.x - b.x, a.y - b.y)); } return w; } },
+  // 測試：在 (x, y) 半徑 r 內（避開建築）放 n 隻喪屍
+  spawnZombies(x, y, n, r) {
+    const a = new Float32Array(n * 4), inf = new Uint32Array(n * 2);
+    let k = 0;
+    for (let g = 0; k < n && g < n * 20; g++) { const ang = Math.random() * 6.2832, d = Math.sqrt(Math.random()) * r, px = x + Math.cos(ang) * d, py = y + Math.sin(ang) * d; if (hardAt(px, py)) continue; a.set([px, py, 0, 0], k * 4); inf.set([1 | (((Math.random() * 256) | 0) << 8), 0], k * 2); k++; }
+    k = Math.min(k, MAX_AGENTS - sim.n);
+    device.queue.writeBuffer(agentsB, sim.n * 16, a, 0, k * 4); device.queue.writeBuffer(infoB, sim.n * 8, inf, 0, k * 2);
+    sim.n += k; return k;
+  },
+  hits: hitStats, get tracers() { return tracers.map((t) => [...t]); }, detonate: (x, y, r, z) => detonate(x, y, r, 0.9, z || 0),
   select(ids) { sel.clear(); for (const id of ids) sel.add(id); return [...sel]; },
   get selection() { return [...sel]; },
   order: (x, y) => orderMove(x, y),

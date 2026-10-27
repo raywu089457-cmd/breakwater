@@ -158,6 +158,8 @@ const WGSL_MOVE = WGSL_COMMON + /* wgsl */`
 @group(0) @binding(6) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read> pile: array<f32>;
 @group(0) @binding(8) var wallIds: texture_2d<u32>;
+struct KillLog { n: atomic<u32>, p0: u32, p1: u32, p2: u32, e: array<vec4f, ${KILL_CAP}> };   // e：x, y, 來源, 時間
+@group(0) @binding(9) var<storage, read_write> killLog: KillLog;
 var<workgroup> wAlive: atomic<u32>;
 var<workgroup> wKills: atomic<u32>;
 var<workgroup> wClimb: atomic<u32>;
@@ -168,6 +170,14 @@ fn tileAt(c: vec2i) -> u32 {
 }
 fn hard(t: u32) -> bool { return t == 1u || t == 2u; }
 fn blockedAt(c: vec2i) -> bool { let t = tileAt(c); return hard(t) || t == 7u; }
+// 地面射手的視線：從喪屍往射手每 1.5 m 取樣，中間隔著建築就打不到（牆 4 m，打得過去）
+fn losClear(a: vec2f, b: vec2f) -> bool {
+  let n = u32(ceil(distance(a, b) / 1.5));
+  for (var s = 1u; s < n; s++) {
+    if (tileAt(vec2i(floor(mix(a, b, f32(s) / f32(n))))) == 1u) { return false; }
+  }
+  return true;
+}
 fn pileAt(c: vec2i) -> f32 {
   let q = clamp(c, vec2i(0), vec2i(i32(WN) - 1));
   return pile[u32(q.y) * WN + u32(q.x)];
@@ -215,12 +225,14 @@ fn stepAgent(i: u32) {
   let rbase = pcg(i ^ (tick * 2654435761u));
   var dead = false;
   var fling = vec2f(0.0);
+  var src = 0u;
   for (var k = 0u; k < S.nZones && !dead; k++) {
     let s = S.zones[k];
     let d = distance(p, s.xy);
-    if (d >= s.z) { continue; }
+    if (d >= abs(s.z)) { continue; }
+    if (s.z < 0.0 && !losClear(p, s.xy)) { continue; }   // 半徑負的＝地面射手，要看得到
     if (last) { atomicAdd(&counters[${ZONE_BASE}u + k], 1u); }   // 區內數量（讀回去算命中率）
-    if (rnd(rbase + k * 7919u) < s.w * S.dt) { dead = true; if (d > 0.01) { fling = (p - s.xy) / d * 0.3; } }
+    if (rnd(rbase + k * 7919u) < s.w * S.dt) { dead = true; src = k; if (d > 0.01) { fling = (p - s.xy) / d * 0.3; } }
   }
   if ((S.flags & 2u) != 0u) {
     for (var k = 0u; k < S.nOnce && !dead; k++) {
@@ -228,7 +240,7 @@ fn stepAgent(i: u32) {
       let d = distance(p, s.xy);
       if (d >= s.z) { continue; }
       let q = d / s.z;
-      if (rnd(rbase + k * 104729u + 17u) < s.w * (1.0 - 0.75 * q * q)) { dead = true; if (d > 0.01) { fling = (p - s.xy) / d * (1.0 - q) * 3.0; } }
+      if (rnd(rbase + k * 104729u + 17u) < s.w * (1.0 - 0.75 * q * q)) { dead = true; src = 100u + k; if (d > 0.01) { fling = (p - s.xy) / d * (1.0 - q) * 3.0; } }
     }
   }
   for (var k = 0u; k < S.nLines && !dead; k++) {
@@ -238,9 +250,11 @@ fn stepAgent(i: u32) {
     let d = distance(p, a0.xy + ab * t);
     if (d >= a1.x) { continue; }
     if (last) { atomicAdd(&counters[${LINE_BASE}u + k], 1u); }
-    if (rnd(rbase + k * 31337u + 5u) < a1.y * S.dt) { dead = true; fling = normalize(ab + vec2f(1e-4)) * 0.4; }
+    if (rnd(rbase + k * 31337u + 5u) < a1.y * S.dt) { dead = true; src = 200u + k; fling = normalize(ab + vec2f(1e-4)) * 0.4; }
   }
   if (dead) {
+    let w = atomicAdd(&killLog.n, 1u);
+    if (w < ${KILL_CAP}u) { killLog.e[w] = vec4f(p, f32(src), S.time); }
     var cp = p + fling;
     if (blockedAt(vec2i(floor(cp)))) { cp = p; }
     agents[i] = vec4f(cp, 0.0, 0.0);
@@ -373,21 +387,22 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: vec3u
 `;
 
 // 單位探測：每個單位一個工作群組，掃周圍 96×96 m。寫進 counters[PROBE_BASE + k*8 + …]：
-// 0 接觸半徑內喪屍數、1 48 m 內喪屍數、2/3 它們相對位置總和（各加 64 免得負數）、4 8 m 內最高屍堆（公分）
+// 0 接觸半徑內喪屍數、1 48 m 內喪屍數、2/3 它們相對位置總和（各加 64 免得負數）、4 8 m 內最高屍堆（公分）、
+// 5 8–48 m 內最密的 3×3 m（高 10 位＝隻數、低 22 位＝中心格編號）：戰車主砲瞄這裡，不瞄可能是空地的重心
 const WGSL_PROBE = WGSL_COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> S: Sim;
 @group(0) @binding(1) var<storage, read> dens: array<u32>;
 @group(0) @binding(2) var<storage, read> pile: array<f32>;
 @group(0) @binding(3) var<storage, read_write> counters: array<atomic<u32>>;
-var<workgroup> wc: array<atomic<u32>, 5>;
+var<workgroup> wc: array<atomic<u32>, 6>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u32) {
   let k = wg.x;
-  if (li < 5u) { atomicStore(&wc[li], 0u); }
+  if (li < 6u) { atomicStore(&wc[li], 0u); }
   workgroupBarrier();
   let u = S.units[k];
   let base = vec2i(floor(u.xy)) - vec2i(48);
-  var contact = 0u; var inr = 0u; var sx = 0u; var sy = 0u; var mp = 0u;
+  var contact = 0u; var inr = 0u; var sx = 0u; var sy = 0u; var mp = 0u; var best = 0u;
   for (var j = li; j < 9216u; j += 256u) {
     let c = base + vec2i(i32(j % 96u), i32(j / 96u));
     if (c.x < 0 || c.y < 0 || c.x >= i32(WN) || c.y >= i32(WN)) { continue; }
@@ -399,10 +414,15 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
     if (n == 0u) { continue; }
     if (d < u.w) { contact += n; }
     if (d < 48.0) { inr += n; sx += n * u32(off.x + 64.0); sy += n * u32(off.y + 64.0); }
+    if (d > 8.0 && d < 48.0 && c.x > 0 && c.y > 0 && c.x < i32(WN) - 1 && c.y < i32(WN) - 1) {
+      var s3 = 0u;
+      for (var oy = -1; oy <= 1; oy++) { for (var ox = -1; ox <= 1; ox++) { s3 += dens[u32(c.y + oy) * WN + u32(c.x + ox)]; } }
+      best = max(best, (min(s3, 1023u) << 22u) | idx);
+    }
   }
-  atomicAdd(&wc[0], contact); atomicAdd(&wc[1], inr); atomicAdd(&wc[2], sx); atomicAdd(&wc[3], sy); atomicMax(&wc[4], mp);
+  atomicAdd(&wc[0], contact); atomicAdd(&wc[1], inr); atomicAdd(&wc[2], sx); atomicAdd(&wc[3], sy); atomicMax(&wc[4], mp); atomicMax(&wc[5], best);
   workgroupBarrier();
-  if (li < 5u) { atomicStore(&counters[${PROBE_BASE}u + k * 8u + li], atomicLoad(&wc[li])); }
+  if (li < 6u) { atomicStore(&counters[${PROBE_BASE}u + k * 8u + li], atomicLoad(&wc[li])); }
 }
 `;
 

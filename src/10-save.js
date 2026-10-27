@@ -146,7 +146,7 @@ async function applySave(slot) {
     const u = spawnUnit(d.type, d.x, d.y);
     if (!u) continue;
     Object.assign(u, d, { slot: u.slot, path: [] });
-    if (!isAir(u) && Math.hypot(u.tx - u.x, u.ty - u.y) > 3) u.path = findPath(u.x, u.y, u.tx, u.ty) || [];
+    if (!isAir(u) && Math.hypot(u.tx - u.x, u.ty - u.y) > 3) u.path = pathFor(u, u.tx, u.ty) || [];
   }
   nextUnitId = s.nextUnitId;
   s.districts.forEach((d, k) => Object.assign(districts[k], d));

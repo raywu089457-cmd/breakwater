@@ -37,6 +37,8 @@ const SHELTER_SLOT0 = 20;   // 探測槽：0–19 部隊、20+ 避難所
 // 牆板與破牆者：牆切成 PANEL 公尺一片，各 PANEL_HP 耐久；每 1024 隻有 BRUTE_K 隻是破牆者（大隻、慢、不爬牆，頂著牆板每秒扣 BRUTE_DPS）
 // counters 在探測之後接 WALL_BASE + 牆板編號：這一幀頂著那片牆板的破牆者數
 const WALL_BASE = PROBE_BASE + MAX_SUNITS * 8, MAX_PANELS = 2048, PANEL = 4, PANEL_HP = 100, BRUTE_K = 4, BRUTE_DPS = 1;
+// 擊殺紀錄：GPU 每打死一隻就記下位置與來源（殺傷區 k、單次砲擊 100+k、射擊線 200+k），每幀讀回來畫曳光彈／血花，畫面跟模擬算到的位置一致
+const KILL_CAP = 1024;
 const PTILE = 32;                 // 屍堆計算區塊邊長（公尺）
 const PTN = WN / PTILE;           // 每邊區塊數
 const MAX_PTILES = 4096;

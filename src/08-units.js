@@ -24,7 +24,7 @@ function spawnUnit(type, x, y) {
   const t = UT[type];
   const u = { id: nextUnitId++, type, slot: s, x, y, z: type === 'heli' || type === 'transport' ? 40 : 0, tx: x, ty: y, tz: 40, path: [], vx: 0, vy: 0,
     face: Math.PI / 2, dir: 4, hp: t.hp || 0, men: type === 'squad' ? 8 : 0, dmg: 0, fireT: 0, firing: false, aimX: x, aimY: y + 10,
-    walk: 0, hang: 0, reach: 0, crowd: 0, flash: 0, danger: false, kills: 0, cargo: 0, supplyLoad: 0, mission: null, phase: null };
+    walk: 0, hang: 0, reach: 0, crowd: 0, flash: 0, danger: false, kills: 0, cargo: 0, supplyLoad: 0, mission: null, phase: null, squeeze: 1, stuck: 0, bestD: null };
   slots[s] = u; units.push(u);
   return u;
 }
@@ -48,6 +48,7 @@ function rebuildUnitBlock() {
     }
     unitBlock[ny * NN + nx] = hard >= 6 || wall > 0 ? 1 : 0;
   }
+  rebuildClearance();
 }
 rebuildUnitBlock();
 const nIdx = (x, y) => clamp(Math.floor(y / CELL), 0, NN - 1) * NN + clamp(Math.floor(x / CELL), 0, NN - 1);
@@ -65,9 +66,11 @@ function nearestOpen(i) {
 const gScore = new Float32Array(NN * NN), came = new Int32Array(NN * NN), closed = new Uint8Array(NN * NN);
 // 危險格（Nexus 封鎖的路段）：每格多算這麼多步，有別條路就繞，沒有才硬闖（10-nexus 的 rebuildDanger 填）
 const pathDanger = new Float32Array(NN * NN);
-function findPath(sx, sy, tx, ty) {
+// r＝單位半徑：太窄（淨空不夠）的格子當成走不過；這樣找不到路才退回不管寬度
+function findPath(sx, sy, tx, ty, r = 0) {
   const s = nearestOpen(nIdx(sx, sy)), t = nearestOpen(nIdx(tx, ty));
   if (s < 0 || t < 0) return null;
+  const narrow = r * 0.9;
   gScore.fill(Infinity); closed.fill(0);
   const tX = t % NN, tY = (t / NN) | 0;
   const h = (i) => { const dx = Math.abs((i % NN) - tX), dy = Math.abs(((i / NN) | 0) - tY); return Math.max(dx, dy) + 0.414 * Math.min(dx, dy); };
@@ -88,21 +91,23 @@ function findPath(sx, sy, tx, ty) {
       if (nx < 0 || ny < 0 || nx >= NN || ny >= NN) continue;
       const j = ny * NN + nx;
       if (unitBlock[j] || closed[j]) continue;
+      if (narrow > 0 && j !== t && cellClr[j] < narrow) continue;
       if (dx && dy && (unitBlock[y * NN + nx] || unitBlock[ny * NN + x])) continue;
       const g = gScore[i] + (dx && dy ? 1.414 : 1) + pathDanger[j];
       if (g < gScore[j]) { gScore[j] = g; came[j] = i; push(g + h(j), j); }
     }
   }
-  if (!found) return null;
+  if (!found) return r > 0 ? findPath(sx, sy, tx, ty, 0) : null;
   const cells = [];
   for (let i = t; i !== -1; i = came[i]) cells.push(i);
   cells.reverse();
-  // 拉直：從目前點往後找最遠看得到的格子
-  const pt = (i) => [((i % NN) + 0.5) * CELL, (((i / NN) | 0) + 0.5) * CELL];
+  // 拉直：從目前點往後找最遠看得到的格子（路徑點＝格子裡最空曠的點；直線上每一點都要站得下這個半徑）
+  const pt = (i) => [cellPt[i * 2], cellPt[i * 2 + 1]];
+  const need = Math.min(narrow, 2.5);
   const los = (a, b) => {
     const [ax, ay] = pt(a), [bx, by] = pt(b);
-    const n = Math.ceil(Math.hypot(bx - ax, by - ay) / 1.5);
-    for (let k = 1; k < n; k++) { const x = ax + ((bx - ax) * k) / n, y = ay + ((by - ay) * k) / n; if (blockedW(x, y) || pathDanger[nIdx(x, y)] > 0) return false; }
+    const n = Math.ceil(Math.hypot(bx - ax, by - ay) / 1);
+    for (let k = 1; k < n; k++) { const x = ax + ((bx - ax) * k) / n, y = ay + ((by - ay) * k) / n; if (blockedW(x, y) || clearAt(x, y) < need || pathDanger[nIdx(x, y)] > 0) return false; }
     return true;
   };
   const out = [];
@@ -112,9 +117,10 @@ function findPath(sx, sy, tx, ty) {
     while (j > k + 1 && !los(cells[k], cells[j])) j--;
     out.push(pt(cells[j])); k = j;
   }
-  if (out.length) out[out.length - 1] = [tx, ty];
+  if (out.length) out[out.length - 1] = r > 0 ? nearestClear(tx, ty, r) : [tx, ty];   // 終點在建築邊上就挪到站得下的地方
   return out;
 }
+const pathFor = (u, x, y) => findPath(u.x, u.y, x, y, UR[u.type]);
 
 // ----- 指令 -----
 function orderMove(x, y, ids = [...sel]) {
@@ -124,7 +130,8 @@ function orderMove(x, y, ids = [...sel]) {
     const ox = ((k % cols) - (cols - 1) / 2) * 12, oy = (Math.floor(k / cols) - (Math.ceil(list.length / cols) - 1) / 2) * 12;
     const gx = clamp(x + ox, 2, WN - 2), gy = clamp(y + oy, 2, WN - 2);
     u.tx = gx; u.ty = gy;
-    u.path = isAir(u) ? [] : findPath(u.x, u.y, gx, gy) || [];
+    u.path = isAir(u) ? [] : pathFor(u, gx, gy) || [];
+    u.stuck = 0;
   });
   return list.length;
 }
@@ -153,19 +160,19 @@ function spawnZombieAt(x, y) {
   device.queue.writeBuffer(infoB, sim.n * 8, new Uint32Array([1 | (((Math.random() * 256) | 0) << 8), 0]));
   sim.n++;
 }
-function explodeAt(x, y, r, lethal, fxSize) {
-  sim.strikesOnce.push([x, y, r, lethal]);
-  game.fx.push([x, y, fxSize, sim.time]);
-  fxExplosion(x, y, fxSize);
-  game.marks.push({ type: 3, x, y, r: r * 0.8, life: 60, max: 60 });
-}
+const explodeAt = (x, y, r, lethal, z = 0) => detonate(x, y, r, lethal, z, 60);
 // 畫面上的高度：直升機實際高度壓縮顯示（40 m 畫成 16 m），不然戰術視角下會飛出畫面；物理照用實際高度
 const visZ = (u) => (isAir(u) ? 4 + u.z * 0.3 : 1);
 const angTo8 = (th) => ((Math.round((-90 - (th * 180) / Math.PI) / 45) % 8) + 8) % 8;
 const angTo4 = (th) => { const c = Math.cos(th), s = Math.sin(th); return Math.abs(c) > Math.abs(s) ? (c > 0 ? 2 : 1) : (s > 0 ? 3 : 0); };
 
 // ----- 每幀更新（sdt＝模擬秒） -----
+const unitPerf = { ms: 0, max: 0 };
 function updateUnits(sdt) {
+  const tU = performance.now();
+  try { updateUnitsInner(sdt); } finally { const ms = performance.now() - tU; unitPerf.ms = lerp(unitPerf.ms, ms, 0.05); unitPerf.max = Math.max(unitPerf.max, ms); }
+}
+function updateUnitsInner(sdt) {
   const P = sim.probe;
   for (const u of [...units]) {
     const t = UT[u.type], b = u.slot * 8;
@@ -187,7 +194,10 @@ function updateUnits(sdt) {
       const drag = 1 / (1 + u.hang * 0.6);
       mvx = u.vx * drag; mvy = u.vy * drag;
       u.x = clamp(u.x + mvx * sdt, 1, WN - 1); u.y = clamp(u.y + mvy * sdt, 1, WN - 1);
-      const vz = (u.tz > u.z ? Math.min(5, (u.tz - u.z) * 1.5) : Math.max(-4, (u.tz - u.z) * 1.5)) - 0.9 * u.hang;
+      // 前面或底下有比較高的樓：先爬升越過去（設定的高度不變，過了樓再降回來）
+      const zGoal = Math.max(u.tz, airClearance(u, dx, dy, d));
+      u.climbing = zGoal > u.tz + 0.5;
+      const vz = (zGoal > u.z ? Math.min(u.climbing ? 9 : 5, (zGoal - u.z) * 1.5) : Math.max(-4, (zGoal - u.z) * 1.5)) - 0.9 * u.hang;
       u.z = Math.max(u.landed ? 2.5 : 0, u.z + vz * sdt);
     } else {
       if (ctl) {
@@ -197,13 +207,17 @@ function updateUnits(sdt) {
       } else if (u.path.length) {
         const [wx, wy] = u.path[0];
         const dx = wx - u.x, dy = wy - u.y, d = Math.hypot(dx, dy);
-        if (d < (u.type === 'tank' || u.type === 'truck' ? 3 : 1.5)) u.path.shift();
+        if (d < (u.type === 'tank' || u.type === 'truck' ? 3 : 1.5)) { u.path.shift(); u.bestD = null; }
         else { mvx = (dx / d) * t.speed; mvy = (dy / d) * t.speed; }
+        followCheck(u, d, sdt);
       }
-      const nx = u.x + mvx * sdt, ny = u.y + mvy * sdt;
-      if (!blockedW(nx, ny)) { u.x = nx; u.y = ny; }
-      else if (!blockedW(nx, u.y)) u.x = nx;
-      else if (!blockedW(u.x, ny)) u.y = ny;
+      // 每步最多 0.5 m，邊走邊推出建築／牆／水（4 倍速也不會穿過 2 m 厚的牆）
+      const ox = u.x, oy = u.y, stepN = Math.max(1, Math.ceil((Math.hypot(mvx, mvy) * sdt) / 0.5));
+      for (let k = 0; k < stepN; k++) { u.x += (mvx * sdt) / stepN; u.y += (mvy * sdt) / stepN; collideGround(u); }
+      u.x = clamp(u.x, 1, WN - 1); u.y = clamp(u.y, 1, WN - 1);
+      if (sdt > 0) { const ax = (u.x - ox) / sdt, ay = (u.y - oy) / sdt; if (Math.hypot(ax, ay) < Math.hypot(mvx, mvy) * 0.25) { mvx = ax; mvy = ay; } }   // 頂著牆：原地不算在走
+      // 卡住時縮小的半徑：周圍夠空就慢慢長回來
+      if (u.squeeze < 1) u.squeeze = Math.min(1, u.squeeze + sdt * 0.25, Math.max(u.squeeze, (clearAt(u.x, u.y) - 0.2) / UR[u.type]));
     }
     const sp = Math.hypot(mvx, mvy);
     u.moving = sp > 0.3;
@@ -218,13 +232,15 @@ function updateUnits(sdt) {
     if (u.firing && u.type !== 'transport') u.face = Math.atan2(u.aimY - u.y, u.aimX - u.x);
     else if (sp > 0.3) u.face = Math.atan2(mvy, mvx);
     u.dir = angTo8(u.face);
-    // 戰車主砲：AI 對著屍群重心、操控時對著準星（點住才開）
-    if (u.type === 'tank' && u.fireT <= 0 && supply.stock >= 4 && ((ctl && aim.firing) || (!ctl && inr > 25))) {
+    // 戰車主砲：AI 瞄最密的那團（看得到才開）、操控時對著準星（點住才開）。砲彈走直線，路上撞到建築就在牆面炸
+    const shot = u.type === 'tank' && u.fireT <= 0 && supply.stock >= 4 && ((ctl && aim.firing) || (!ctl && inr > 25)) ? tankTarget(u, ctl, P[b + 5]) : null;
+    if (shot) {
       useSupply(4);
-      const sx = ctl ? 0 : (Math.random() - 0.5) * 8, sy = ctl ? 0 : (Math.random() - 0.5) * 8;
-      const ex = u.aimX + sx, ey = u.aimY + sy;
-      explodeAt(ex, ey, 6, 0.9, 13);
-      tracers.push([u.x + Math.cos(u.face) * 5, u.y + Math.sin(u.face) * 5, 2.2, ex, ey, 0.5, 0.08, 1]);
+      u.face = Math.atan2(shot[1] - u.y, shot[0] - u.x); u.dir = angTo8(u.face);
+      const hit = rayHitBuilding(u.x + Math.cos(u.face) * 5, u.y + Math.sin(u.face) * 5, 2.2, shot[0], shot[1], 0.5);
+      const [ex, ey, ez] = hit || [shot[0], shot[1], 0];
+      explodeAt(ex, ey, 6, 0.9, ez > 1 ? ez : 0);
+      tracers.push([u.x + Math.cos(u.face) * 5, u.y + Math.sin(u.face) * 5, 2.2, ex, ey, Math.max(0.5, ez), 0.08, 1]);
       game.fx.push([u.x + Math.cos(u.face) * 5.5, u.y + Math.sin(u.face) * 5.5, 4, sim.time]);
       // 砲口爆風：一團亮光＋往前噴的煙，車身底下揚塵
       const mx = u.x + Math.cos(u.face) * 6, my = u.y + Math.sin(u.face) * 6;
@@ -233,35 +249,26 @@ function updateUnits(sdt) {
       for (let k = 0; k < 6; k++) { const a = Math.random() * 6.2832; emit(u.x + Math.cos(a) * 3, u.y + Math.sin(a) * 3, 0.3, Math.cos(a) * 5, Math.sin(a) * 5, 0.3, 0.7, 1, 2.6, 0.55, 0.5, 0.42, 0.45, 0, 2); }
       u.fireT = ctl ? 2.5 : t.reload;
     }
-    // 曳光彈（純畫面）
-    if (u.firing && sdt > 0) {
-      const shooters = u.type === 'squad' ? u.men : u.type === 'tank' ? 1 : 2;
-      const n = Math.random() < shooters * sdt * 6 ? 1 : 0;
-      for (let k = 0; k < n; k++) {
-        const r = u.type === 'squad' ? 3 : 1.5, z0 = isAir(u) ? visZ(u) : u.type === 'tank' ? 2.4 : 1.25;
-        // 步兵：從隨便一個士兵的槍口射出；其他：從車身／機身
-        const [ox, oy] = u.type === 'squad' ? soldierOffset(u, (Math.random() * u.men) | 0) : [0, 0];
-        const mx = u.x + ox + Math.cos(u.face) * (u.type === 'squad' ? 0.7 : 2), my = u.y + oy + Math.sin(u.face) * (u.type === 'squad' ? 0.7 : 2);
-        const hx = u.aimX + (Math.random() - 0.5) * r * 2, hy = u.aimY + (Math.random() - 0.5) * r * 2;
-        tracers.push([mx, my, z0, hx, hy, 0.8, 0.07, 0]);
-        fxMuzzle(mx, my, z0, false);
-        fxImpact(hx, hy);
-      }
+    // 曳光彈：打死喪屍的那幾發由 GPU 擊殺紀錄畫（onKills → shotAt，畫到牠倒下的位置）；這裡補沒打中的幾發（只揚塵、不噴血）
+    if (u.firing && sdt > 0 && Math.random() < (u.type === 'squad' ? u.men : u.type === 'tank' ? 1 : 2) * sdt * 3) {
+      const [mx, my, mz] = muzzleOf(u);
+      fxMuzzle(mx, my, mz, false);
+      missShot(mx, my, mz, u, u.type === 'squad' ? 3 : 1.5, !isAir(u));
     }
     // --- 被咬 / 被抓 ---
     if (u.type === 'squad') {
       u.dmg += contact * t.bite * sdt;
       while (u.dmg >= 100 && u.men > 0) {
         u.dmg -= 100; u.men--;
-        const off = soldierOffset(u, u.men);
-        fxSoldierDown(u.x + off[0], u.y + off[1]); u.hurt = 0.25;
-        if (Math.random() < 0.7) spawnZombieAt(u.x + off[0], u.y + off[1]);   // 被咬的變成喪屍
+        const [sx, sy] = soldierPos(u, u.men);
+        fxSoldierDown(sx, sy); u.hurt = 0.25;
+        if (Math.random() < 0.7) spawnZombieAt(sx, sy);   // 被咬的變成喪屍
         game.lost = (game.lost || 0) + 1;
       }
       if (u.men <= 0) { removeUnit(u); continue; }
     } else if (u.type === 'tank' || u.type === 'truck') {
       u.hp -= contact * t.bite * sdt;
-      if (u.hp <= 0) { explodeAt(u.x, u.y, 9, 0.95, 22); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
+      if (u.hp <= 0) { explodeAt(u.x, u.y, 9, 0.95); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
     } else {
       u.reach = maxPile + 2.7; u.crowd = contact;
       u.danger = u.z < u.reach + 3 && contact > 6;
@@ -271,10 +278,46 @@ function updateUnits(sdt) {
       } else if (u.hang > 0 && u.z > u.reach + 1.5 && Math.random() < 1.2 * sdt) u.hang--;
       u.hp -= u.hang * 2.5 * sdt;
       if (u.flash > 0) u.flash -= sdt;
-      if ((u.z <= 0.5 && !u.landed) || u.hp <= 0) { explodeAt(u.x, u.y, 11, 0.95, 26); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
+      if ((u.z <= 0.5 && !u.landed) || u.hp <= 0) { explodeAt(u.x, u.y, 11, 0.95); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
     }
   }
+  separateUnits(units);
   for (let k = tracers.length - 1; k >= 0; k--) if ((tracers[k][6] -= sdt) <= 0) tracers.splice(k, 1);
+}
+// 走路徑時 1.2 秒沒更靠近路徑點＝卡住：終點被別的單位佔著就停在旁邊；不然半徑縮小（擠得過窄巷）、重新找路
+function followCheck(u, d, sdt) {
+  if (u.bestD == null || d < u.bestD - 0.3) { u.bestD = d; u.stuck = 0; return; }
+  u.stuck = (u.stuck || 0) + sdt;
+  if (u.stuck < 1.2) return;
+  u.stuck = 0; u.bestD = null;
+  if (u.path.length === 1 && d < UR[u.type] * 3 + 4) { u.path = []; return; }
+  u.squeeze = Math.max(0.35, (u.squeeze || 1) * 0.7);
+  const p = findPath(u.x, u.y, u.tx, u.ty, unitRadius(u));
+  if (p) u.path = p;
+}
+// 直升機要飛多高才不會撞樓：機身底下 4 m 內、往目標方向 30 m 內最高的屋頂／牆 + 4 m
+function airClearance(u, dx, dy, d) {
+  let top = 0;
+  for (let oy = -3; oy <= 3; oy += 3) for (let ox = -3; ox <= 3; ox += 3) top = Math.max(top, solidTop(u.x + ox, u.y + oy));
+  if (d > 1) { const L = Math.min(d, 30); for (let s = 2; s <= L; s += 2) top = Math.max(top, solidTop(u.x + (dx / d) * s, u.y + (dy / d) * s)); }
+  return top > 0 ? top + 4 : 0;
+}
+// 第 k 個士兵的世界座標：貼著建築／牆時隊形往中間收，士兵不會站進牆裡
+// 戰車主砲瞄哪：AI＝探測回報 8–48 m 內最密的 3×3 m（中間隔著建築就改瞄重心，重心也看不到就不開）；操控＝準星
+function tankTarget(u, ctl, best) {
+  if (ctl) return [aim.x, aim.y];
+  const n = best >>> 22, idx = best & 0x3fffff;
+  const cands = [];
+  if (n >= 3) cands.push([(idx % WN) + 0.5 + (Math.random() - 0.5) * 1.5, Math.floor(idx / WN) + 0.5 + (Math.random() - 0.5) * 1.5]);
+  cands.push([u.aimX, u.aimY]);
+  for (const [x, y] of cands) if (Math.hypot(x - u.x, y - u.y) < UT.tank.range && groundLos(u.x, u.y, x, y)) return [x, y];
+  return null;
+}
+function soldierPos(u, k) {
+  const [ox, oy] = soldierOffset(u, k);
+  let x = u.x + ox, y = u.y + oy;
+  if (hardAt(x, y) || clearAt(x, y) < 0.3) { x = u.x + ox * 0.35; y = u.y + oy * 0.35; }
+  return [x, y];
 }
 function soldierOffset(u, k) {
   const r = k >> 2, c = k & 3;
@@ -302,8 +345,9 @@ function unitZones() {
     let a = [0, 0, 0, 0], b = [0, 0, 0, 0];
     if (u && control !== u) {
       const t = UT[u.type];
-      if (u.type === 'squad' && u.firing) a = [u.x, u.y, t.range, rate(t.rate * u.men, zc[i])];
-      if (u.type === 'tank' && u.firing) a = [u.x, u.y, t.range, rate(t.rate, zc[i])];
+      // 地面射手：半徑給負的＝GPU 只算看得到的（中間沒有建築）
+      if (u.type === 'squad' && u.firing) a = [u.x, u.y, -t.range, rate(t.rate * u.men, zc[i])];
+      if (u.type === 'tank' && u.firing) a = [u.x, u.y, -t.range, rate(t.rate, zc[i])];
       if (isAir(u) && supply.stock > 0 && (u.type === 'heli' || u.firing)) { const r = clamp(8 + u.z * 0.5, 8, t.range), acc = clamp(1.25 - u.z / 50, 0.45, 1.15); a = [u.x, u.y, r, rate(t.rate * acc, zc[i])]; }
     }
     if (u && u.type === 'tank' && u.moving) b = [u.x, u.y, 3.2, 8];   // 輾過去
@@ -315,7 +359,9 @@ function unitZones() {
 function unitLines() {
   const u = control;
   if (!u || !aim.firing || u.type === 'tank' || u.type === 'truck' || supply.stock <= 0) return [];
-  const dx = aim.x - u.x, dy = aim.y - u.y, d = Math.hypot(dx, dy) || 1, L = Math.min(d, isAir(u) ? 45 : 60);
+  const dx = aim.x - u.x, dy = aim.y - u.y, d = Math.hypot(dx, dy) || 1;
+  let L = Math.min(d, isAir(u) ? 45 : 60);
+  if (!isAir(u)) { const hit = rayHitBuilding(u.x, u.y, 1.5, u.x + (dx / d) * L, u.y + (dy / d) * L, 1.5); if (hit) L = Math.hypot(hit[0] - u.x, hit[1] - u.y); }   // 射擊線停在第一棟建築
   const kps = u.type === 'squad' ? u.men * 2.6 : 22;
   return [[u.x, u.y, u.x + (dx / d) * L, u.y + (dy / d) * L, isAir(u) ? 2.5 : 1.6, Math.min(6, kps / Math.max(sim.lineCounts[0], 1)), 0, 0]];
 }
@@ -350,11 +396,11 @@ function pushUnitInstances(push) {
       const w = (1.85 * sl.cw) / sl.ch;
       const row4 = angTo4(u.face);
       for (let k = 0; k < u.men; k++) {
-        const [ox, oy] = soldierOffset(u, k);
+        const [px, py] = soldierPos(u, k);
         let row = row4, col = 0, flip = 0;
         if (u.firing && ((Math.floor(sim.time * 12) + k) & 1)) { row = 2; col = 4; flip = Math.cos(u.face) < 0 ? 1 : 0; }
         else if (u.moving) col = (Math.floor(u.walk * 1.6) + k) & 3;
-        push([u.x + ox, u.y + oy, 0, w], [1.85, sl.x + col * sl.cw, sl.y + row * sl.ch, 5], [sl.cw, sl.ch, 1, flip | (u.hurt > 0 ? 8 : 0)]);
+        push([px, py, 0, w], [1.85, sl.x + col * sl.cw, sl.y + row * sl.ch, 5], [sl.cw, sl.ch, 1, flip | (u.hurt > 0 ? 8 : 0)]);
       }
     }
   }
