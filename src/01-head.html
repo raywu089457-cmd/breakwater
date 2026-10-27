@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Breakwater · 屍潮原型</title>
+<link rel="icon" href="data:," />
+<style>
+  :root { color-scheme: dark; --panel: rgba(10, 13, 16, .72); --line: rgba(255,255,255,.09); --dim: rgba(232,236,240,.55); --accent: #ffb347; }
+  html, body { margin: 0; height: 100%; background: #07090b; overflow: hidden;
+    font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, "Microsoft JhengHei", monospace; color: #e8ecf0; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; image-rendering: pixelated; cursor: crosshair; }
+  canvas.drag { cursor: grabbing; }
+  .box { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 9px 11px; user-select: none; }
+  #stats { top: 12px; left: 12px; min-width: 210px; pointer-events: none; }
+  #stats .t { font-weight: 700; letter-spacing: .18em; color: var(--accent); margin-bottom: 6px; }
+  #stats .r { display: flex; justify-content: space-between; gap: 14px; }
+  #stats .r span:first-child { color: var(--dim); }
+  #stats .r span:last-child { font-variant-numeric: tabular-nums; }
+  #bar { bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px; align-items: center; padding: 6px 8px; max-width: calc(100vw - 24px); white-space: nowrap; }
+  #bar .mode { min-width: 64px; text-align: center; font-weight: 700; letter-spacing: .12em; padding: 0 6px; }
+  #deploy { bottom: 58px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px; align-items: center; padding: 5px 8px; white-space: nowrap; }
+  #deploy .mode { color: var(--dim); padding: 0 6px; }
+  #bar .sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+  button { font: inherit; color: inherit; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 4px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
+  button:hover { background: rgba(255,255,255,.13); }
+  button.on { background: rgba(255,179,71,.22); border-color: rgba(255,179,71,.6); color: #ffd9a8; }
+  #help { bottom: 110px; left: 12px; color: var(--dim); max-width: 260px; pointer-events: none; }
+  #help b { color: #e8ecf0; font-weight: 600; }
+  #selbox { position: fixed; display: none; border: 1px dashed #8fffa0; background: rgba(120,255,140,.08); pointer-events: none; }
+  #dpanel { top: 12px; right: 12px; width: 210px; padding: 8px 10px; }
+  #dpanel .t { font-weight: 700; letter-spacing: .18em; color: var(--accent); margin-bottom: 4px; }
+  #dpanel .dr { display: grid; grid-template-columns: 10px 1fr auto; gap: 7px; align-items: center; padding: 1px 3px; border-radius: 3px; cursor: pointer; }
+  #dpanel .dr:hover { background: rgba(255,255,255,.08); }
+  #dpanel .dr i { width: 8px; height: 8px; border-radius: 2px; }
+  #dpanel .dr .v { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #dpanel .dr.crisis .v { color: #ffc46b; }
+  #dlabels { position: fixed; inset: 0; pointer-events: none; }
+  #dlabels .dl { position: absolute; left: 0; top: 0; text-align: center; white-space: nowrap; text-shadow: 0 1px 2px #000, 0 0 6px #000; }
+  #dlabels .dl b { display: block; font-size: 13px; letter-spacing: .1em; }
+  #dlabels .dl span { font-size: 11px; color: #d8dde2; }
+  #dlabels .dl.crisis b { color: #ffc46b; } #dlabels .dl.lost b { color: #ff7b6b; } #dlabels .dl.base b { color: #8cc8ff; }
+  #elog { position: fixed; top: 54px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 3px; align-items: center; pointer-events: none; }
+  #elog .ev { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; }
+  #elog .ev span { color: var(--dim); margin-right: 8px; }
+  #elog .ev.warn { border-color: rgba(255,179,71,.6); } #elog .ev.bad { border-color: rgba(255,90,70,.7); color: #ffb4a8; } #elog .ev.good { border-color: rgba(120,230,140,.6); }
+  @media (max-width: 1100px) { #dpanel { display: none; } }
+  #nexus { top: 12px; left: 50%; transform: translateX(-50%); cursor: pointer; border-color: rgba(255,60,90,.7); background: rgba(40,6,12,.82); padding: 7px 14px; letter-spacing: .04em; }
+  #nexus b { color: #ff5a78; letter-spacing: .2em; margin-right: 8px; }
+  #nexus span { color: #ffb3c0; }
+  #nexus.attack { animation: nx 0.8s infinite alternate; }
+  #nexus.block { border-color: rgba(255,60,90,.45); background: rgba(30,6,10,.72); }
+  #blabels { position: fixed; inset: 0; pointer-events: none; }
+  #blabels .bl { position: absolute; left: 0; top: 0; white-space: nowrap; font-size: 11px; padding: 1px 6px; border-radius: 3px; background: rgba(40,6,12,.78); border: 1px solid rgba(255,60,90,.7); color: #ffb3c0; }
+  #blabels .bl.holding { color: #fff; background: rgba(150,10,35,.85); }
+  @keyframes nx { from { box-shadow: 0 0 0 rgba(255,40,80,0); } to { box-shadow: 0 0 22px rgba(255,40,80,.6); } }
+  .modal { top: 50%; left: 50%; transform: translate(-50%, -50%); min-width: 420px; max-width: 92vw; padding: 18px 22px; z-index: 10; background: rgba(10,13,16,.94); }
+  .modal .rt { font-size: 16px; font-weight: 700; letter-spacing: .14em; color: var(--accent); margin-bottom: 8px; }
+  .modal .rr { color: var(--dim); margin: 6px 0; }
+  .modal table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+  .modal td { padding: 3px 0; } .modal td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .modal .rb { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .modal .grade { font-size: 54px; font-weight: 800; line-height: 1; margin: 4px 0; }
+  .gS { color: #ffd76b; } .gA { color: #8fffa0; } .gB { color: #8cc8ff; } .gC, .gD { color: #c9c9c9; } .gF { color: #ff6b5b; }
+  .modal .cr { display: grid; grid-template-columns: 110px 1fr auto; gap: 10px; padding: 5px 6px; border-radius: 4px; }
+  .modal .cr.cur { background: rgba(255,179,71,.14); } .modal .cr span { color: var(--dim); }
+  .modal .slots { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .modal .sl { display: grid; grid-template-columns: 80px 1fr 40px 40px; gap: 8px; align-items: center; padding: 3px 6px; }
+  .modal .sl .si { color: var(--dim); font-size: 11px; } .modal .sl button { padding: 2px 0; } .modal .sl button:disabled { opacity: .35; cursor: default; }
+  #qpanel { top: 362px; right: 12px; width: 210px; padding: 8px 10px; }
+  #qpanel .t { font-weight: 700; letter-spacing: .18em; color: var(--accent); margin-bottom: 4px; }
+  #qpanel .qb { display: flex; gap: 4px; margin: 5px 0; } #qpanel .qb button { flex: 1; padding: 3px 0; }
+  #qpanel #qinfo { color: var(--dim); font-size: 11px; }
+  @media (max-width: 1100px) { #qpanel { display: none; } }
+  #err { top: 50%; left: 50%; transform: translate(-50%,-50%); display: none; max-width: 520px; color: #ffb4a8; white-space: pre-wrap; }
+  @media (max-width: 700px) { #help { display: none; } #stats { min-width: 0; } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="stats" class="box"><div class="t">BREAKWATER · M15 <span id="regionName"></span></div><div id="statRows"></div></div>
+<div id="bar" class="box">
+  <span class="mode" id="mode">戰術</span><span class="sep"></span>
+  <button data-speed="0" title="空白鍵">⏸</button><button data-speed="1" class="on">1×</button><button data-speed="2">2×</button><button data-speed="3">3×</button><button data-speed="4">4×</button>
+  <span class="sep"></span>
+  <button data-tool="command" class="on" title="左鍵點選／框選，右鍵移動，TAB 直接操控">指揮</button><button data-sup="artillery" title="Z：6 發砲彈">砲兵</button><button data-sup="naval" title="X：驅逐艦 12 發">艦砲</button><button data-sup="air" title="C：拖曳畫轟炸線">空襲</button><button data-sup="tomahawk" title="V：戰斧巡弋飛彈">戰斧</button><button data-tool="beacon" title="左鍵放置／Shift 移除">信標</button><button data-tool="wall" title="左鍵拖曳蓋牆（拖在受損的牆上＝修牆）／Shift+左鍵拆牆">築牆</button><button id="ciws" class="on" title="基地近防">近防</button>
+  <span class="sep"></span>
+  <button data-alt="40" class="on" title="Q 升高">高</button><button data-alt="15" title="">中</button><button data-alt="6" title="E 降低">低</button>
+  <span class="sep"></span>
+  <button id="mute" title="M：音效開關">🔊</button><button id="camp" title="戰役地圖／撤出戰區">戰役</button>
+</div>
+<div id="deploy" class="box"><span class="mode">部署</span><button data-deploy="squad">步兵班 100</button><button data-deploy="tank">戰車 300</button><button data-deploy="heli">攻擊直升機 250</button><button data-deploy="truck">卡車 80</button><button data-deploy="transport">運輸直升機 150</button><button data-deploy="outpost" data-tool="outpost">前哨 250</button><button data-deploy="nest" data-tool="nest" title="左鍵蓋、Shift+左鍵拆（退一半）">機槍堡 120</button></div>
+<div id="help" class="box"><b>指揮</b> 左鍵點選／框選，<b>右鍵</b>移動（沒選就放信標）<br><b>TAB</b> 直接操控選取單位：WASD 移動、左鍵開火、Esc 離開<br><b>火力支援</b> Z 砲兵 X 艦砲 C 空襲（拖曳畫線）V 戰斧<br><b>撤離</b> 選卡車／運輸直升機，右鍵點避難所<br><b>補給線</b> 選卡車，右鍵點前哨<br><b>築牆</b> 左鍵拖曳（每公尺 2 補給；拖在破牆上＝修牆），Shift+左鍵拆　<b>Q/E</b> 直升機升降<br><b>右鍵拖曳 / WASD</b> 平移　<b>滾輪</b> 縮放<br><b>空白</b> 暫停 <b>1–4</b> 倍速 <b>[ ]</b> 像素大小 <b>M</b> 音效 <b>F5/F9</b> 存讀檔</div>
+<div id="selbox"></div>
+<div id="dlabels"></div>
+<div id="blabels"></div>
+<div id="elog"></div>
+<div id="nexus" class="box" style="display:none"></div>
+<div id="dpanel" class="box"></div>
+<div id="qpanel" class="box"><div class="t">檢疫站</div><div id="qstat"></div><div class="qb"><button data-qp="fast">快速放行</button><button data-qp="standard" class="on">標準篩檢</button><button data-qp="strict">隔離觀察</button></div><div id="qinfo"></div></div>
+<div id="result" class="box modal" style="display:none"></div>
+<div id="cmap" class="box modal" style="display:none"></div>
+<div id="err" class="box"></div>
+<script type="module">

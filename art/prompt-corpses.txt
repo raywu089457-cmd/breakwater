@@ -1,0 +1,4 @@
+Pixel art sprite sheet for a top-down 3/4 view zombie survival strategy game, crisp 16-bit retro pixel art. Dead zombies lying flat on the ground (corpses), seen from above at a 3/4 angle.
+Layout: exactly 4 columns x 2 rows, 8 different corpses, on a flat pure #00FF00 green background. No grid lines, no text, no labels, no shadows on the background.
+Each corpse: a zombie in a torn grey hoodie and dark blue jeans, pale grey-green skin, lying in a different pose (on its back, face down, curled on its side, sprawled with arms out), with a small dark red blood pool under it.
+1-pixel dark outline, limited palette, no anti-aliasing. All corpses use the same scale as a standing figure that is 40 percent of the cell height, each centered in its cell with wide green margins on all sides.

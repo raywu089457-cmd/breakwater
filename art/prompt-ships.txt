@@ -1,0 +1,5 @@
+Pixel art sprite sheet for a top-down 3/4 view military strategy game, crisp 16-bit retro pixel art, 1-pixel dark outline, limited palette, no anti-aliasing.
+Two grey navy warships seen from above at a 3/4 angle, both pointing right (bow to the right), on a flat pure #FF00FF magenta background (no water, no waves, no wake).
+Top half: a large aircraft carrier with a flat flight deck, deck markings, a small island tower and a few parked jets.
+Bottom half: a destroyer with a forward gun turret, missile launch cells and a radar mast.
+No grid lines, no text, no labels, no shadows on the background. Each ship centered in its half with wide magenta margins.

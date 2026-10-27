@@ -1,0 +1,6 @@
+Pixel art sprite sheet for a top-down 3/4 view military strategy game, crisp 16-bit retro pixel art, 1-pixel dark outline, limited palette, no anti-aliasing.
+One olive green military cargo truck (6 wheels, cab in front, canvas-covered cargo bed in the back), seen from above at a 3/4 angle, drawn in 8 rotations.
+Layout: exactly 4 columns x 2 rows on a flat pure #FF00FF magenta background. No grid lines, no text, no labels, no shadows on the background.
+Row 1, left to right: front pointing down toward the viewer, front pointing down-left, front pointing left, front pointing up-left.
+Row 2, left to right: front pointing up away from the viewer, front pointing up-right, front pointing right, front pointing down-right.
+Same truck, same size in every cell, each centered with wide magenta margins on all sides.

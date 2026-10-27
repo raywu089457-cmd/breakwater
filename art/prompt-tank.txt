@@ -1,0 +1,6 @@
+Pixel art sprite sheet for a top-down 3/4 view military strategy game, crisp 16-bit retro pixel art, 1-pixel dark outline, limited palette, no anti-aliasing.
+One modern main battle tank, desert tan camouflage, long gun barrel, tracks with visible treads, turret pointing the same way as the hull, seen from above at a 3/4 angle, drawn in 8 rotations.
+Layout: exactly 4 columns x 2 rows on a flat pure #FF00FF magenta background. No grid lines, no text, no labels, no shadows on the background.
+Row 1, left to right: gun pointing down toward the viewer, gun pointing down-left, gun pointing left, gun pointing up-left.
+Row 2, left to right: gun pointing up away from the viewer, gun pointing up-right, gun pointing right, gun pointing down-right.
+Same tank, same size in every cell, each centered with wide magenta margins on all sides.

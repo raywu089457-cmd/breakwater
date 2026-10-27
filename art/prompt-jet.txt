@@ -1,0 +1,6 @@
+Pixel art sprite sheet for a top-down 3/4 view military strategy game, crisp 16-bit retro pixel art, 1-pixel dark outline, limited palette, no anti-aliasing.
+One grey navy fighter jet (twin engines, twin tail fins, bombs under the wings), seen from above at a 3/4 angle, drawn in 8 rotations.
+Layout: exactly 4 columns x 2 rows on a flat pure #FF00FF magenta background. No grid lines, no text, no labels, no shadows on the background.
+Row 1, left to right: nose pointing down toward the viewer, nose pointing down-left, nose pointing left, nose pointing up-left.
+Row 2, left to right: nose pointing up away from the viewer, nose pointing up-right, nose pointing right, nose pointing down-right.
+Same jet, same size in every cell, each centered with wide magenta margins on all sides.

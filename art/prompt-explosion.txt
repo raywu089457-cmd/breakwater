@@ -1,0 +1,4 @@
+Pixel art explosion animation sprite sheet for a top-down 3/4 view military strategy game, crisp 16-bit retro pixel art.
+An artillery shell hitting the ground: 8 animation frames in exactly 4 columns x 2 rows, read left to right, top row first.
+Frame 1 small white-yellow flash. Frame 2 big bright fireball. Frame 3 fireball expanding with orange flames and flying debris. Frame 4 fire turning into dark smoke. Frames 5 to 8 grey-black smoke cloud rising and thinning out, a few embers, last frame almost gone.
+Flat pure #00FF00 green background, no grid lines, no text, no labels. Limited palette, no anti-aliasing, hard pixel edges. Every frame centered in its cell with wide green margins on all sides; the largest fireball fills about 70 percent of the cell.

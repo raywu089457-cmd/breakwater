@@ -1,0 +1,8 @@
+Pixel art sprite sheet for a top-down 3/4 view zombie survival strategy game. One shambling civilian zombie: torn grey hoodie, dark blue jeans, pale grey-green skin, messy dark hair, blood stains. Crisp 16-bit retro pixel art, 1-pixel dark outline, limited palette, no anti-aliasing.
+Layout: exactly 4 rows x 4 columns on a flat pure #00FF00 green background. No grid lines, no text, no labels, no shadows on the background.
+Row 1: walking toward the viewer (front view).
+Row 2: walking to the left (side view, facing left).
+Row 3: walking to the right (side view, facing right).
+Row 4: walking away from the viewer (back view).
+Each row is a 4-frame walk cycle: arms reaching forward, limping uneven stride, head tilted.
+Every figure is the same size and the same character, centered in its cell with wide green margins on all sides, feet on the same baseline in every cell. Each figure is small, about 40 percent of the cell height.

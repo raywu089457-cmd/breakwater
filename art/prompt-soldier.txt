@@ -1,0 +1,6 @@
+Pixel art sprite sheet for a top-down 3/4 view zombie survival strategy game, crisp 16-bit retro pixel art, 1-pixel dark outline, limited palette, no anti-aliasing.
+One modern soldier: olive green combat uniform, tan plate carrier vest, green helmet, black assault rifle.
+Layout: exactly 4 rows x 4 columns on a flat pure #FF00FF magenta background. No grid lines, no text, no labels, no shadows on the background.
+Row 1: facing the viewer (front view). Row 2: facing left (side view). Row 3: facing right (side view). Row 4: facing away from the viewer (back view).
+In every row: columns 1 to 3 are a walking cycle holding the rifle, column 4 is standing still and firing the rifle with a small bright yellow muzzle flash.
+Same soldier and same size in every cell, each centered with wide magenta margins, feet on the same baseline. Each figure is small, about 40 percent of the cell height.

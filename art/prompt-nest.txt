@@ -1,0 +1,4 @@
+Pixel art sprite sheet for a top-down 3/4 view military strategy game, crisp 16-bit retro pixel art, 1-pixel dark outline, limited palette, no anti-aliasing.
+A military machine gun nest: a round ring of stacked tan sandbags with a heavy machine gun on a tripod in the middle and one soldier in a green helmet behind the gun, seen from above at a 3/4 angle.
+Layout: exactly 2 columns x 1 row on a flat pure #FF00FF magenta background. Left: idle. Right: firing toward the top of the image with a bright yellow muzzle flash.
+No grid lines, no text, no labels, no shadows on the background. Same nest, same size in both cells, each centered with wide magenta margins.

@@ -1,0 +1,65 @@
+{
+ "rows": [
+  "down",
+  "left",
+  "right",
+  "up"
+ ],
+ "frames": 4,
+ "cellW": 39,
+ "cellH": 51,
+ "foot": 1,
+ "levels": [
+  {
+   "x": 0,
+   "y": 0,
+   "cw": 39,
+   "ch": 51
+  },
+  {
+   "x": 156,
+   "y": 0,
+   "cw": 28,
+   "ch": 36
+  },
+  {
+   "x": 268,
+   "y": 0,
+   "cw": 21,
+   "ch": 27
+  },
+  {
+   "x": 352,
+   "y": 0,
+   "cw": 15,
+   "ch": 20
+  },
+  {
+   "x": 412,
+   "y": 0,
+   "cw": 11,
+   "ch": 15
+  },
+  {
+   "x": 456,
+   "y": 0,
+   "cw": 8,
+   "ch": 11
+  }
+ ],
+ "groups": {
+  "other": 0,
+  "outline": 1,
+  "skin": 2,
+  "top": 3,
+  "pants": 4,
+  "hair": 5,
+  "blood": 6
+ },
+ "alphaCode": "a = 255 - group*8",
+ "source": "zombie-walk-v1.jpg",
+ "pitch": [
+  4.6,
+  4.6
+ ]
+}
