@@ -32,29 +32,37 @@ function updateParts(sdt) {
 function fxMuzzle(x, y, z, big) {
   emit(x, y, z, 0, 0, 0, big ? 0.09 : 0.05, big ? 2.6 : 0.75, big ? 1.4 : 0.35, 1, 0.92, 0.55, 1, 0, 0);
 }
-// 子彈打在屍群裡：多半噴血，偶爾揚塵
+// 子彈打中喪屍（GPU 回報的擊殺位置）：噴血
 function fxImpact(x, y) {
-  if (Math.random() < 0.7) {
-    for (let k = 0; k < 2; k++) emit(x, y, 1.1, rr(-2.5, 2.5), rr(-2.5, 2.5), rr(2, 5), rr(0.3, 0.45), 0.32, 0.22, 0.55, 0.04, 0.04, 1, 14, 1);
-  } else emit(x, y, 0.3, rr(-1, 1), rr(-1, 1), rr(0.5, 1.5), 0.5, 0.4, 1.3, 0.55, 0.5, 0.42, 0.55, 0, 2);
+  for (let k = 0; k < 2; k++) emit(x, y, 1.1, rr(-2.5, 2.5), rr(-2.5, 2.5), rr(2, 5), rr(0.3, 0.45), 0.32, 0.22, 0.55, 0.04, 0.04, 1, 14, 1);
 }
-// 爆炸（size＝爆炸圖寬度 m，13 戰車主砲 … 95 戰斧）：衝擊波圈、火球、四散火星、升起的煙
-function fxExplosion(x, y, size) {
-  const s = size / 20, rs = Math.sqrt(s);
-  game.marks.push({ type: 4, x, y, r: size * 0.75, life: 0.45, max: 0.45 });
-  emit(x, y, 1.5 * rs, 0, 0, 0, 0.14, size * 0.45, size * 0.7, 1, 0.9, 0.6, 1, 0, 0);
+// 沒打中：地上揚塵；打在牆／建築上（z 高）多幾顆火星
+function fxMiss(x, y, z = 0.3) {
+  emit(x, y, Math.max(0.3, z), rr(-1, 1), rr(-1, 1), rr(0.5, 1.5), 0.5, 0.4, 1.3, 0.55, 0.5, 0.42, 0.55, 0, 2);
+  if (z > 1) for (let k = 0; k < 2; k++) emit(x, y, z, rr(-3, 3), rr(-3, 3), rr(1, 4), rr(0.15, 0.3), 0.18, 0.1, 1, 0.8, 0.4, 1, 14, 1);
+}
+// 被爆炸炸死的喪屍：在牠倒下的位置噴一小團血
+function fxKillSplash(x, y) {
+  for (let k = 0; k < 3; k++) emit(x, y, 0.9, rr(-3.5, 3.5), rr(-3.5, 3.5), rr(2, 6), rr(0.3, 0.5), 0.35, 0.22, 0.5, 0.03, 0.03, 1, 14, 1);
+}
+// 爆炸（size＝爆炸圖寬度 m，r＝殺傷半徑，z＝爆心高度）：衝擊波圈（剛好畫在殺傷半徑上）、火球、四散火星、升起的煙
+function fxExplosion(x, y, size, r = size / FX_PER_R, z = 0) {
+  const s = size / 20, rs = Math.sqrt(s), ground = z < 0.5;
+  if (ground) game.marks.push({ type: 4, x, y, r, life: 0.45, max: 0.45 });
+  emit(x, y, z + 1.5 * rs, 0, 0, 0, 0.14, size * 0.45, size * 0.7, 1, 0.9, 0.6, 1, 0, 0);
   const nSp = clamp(Math.round(14 * s), 6, 48);
   for (let k = 0; k < nSp; k++) {
     const a = Math.random() * 6.2832, v = rr(6, 20) * rs;
-    emit(x, y, rr(0.5, 2) * rs, Math.cos(a) * v, Math.sin(a) * v, rr(5, 15) * rs, rr(0.45, 1.0), rr(0.3, 0.5) * rs, 0.2, 1, rr(0.65, 0.9), 0.3, 1, 22, 1);
+    emit(x, y, z + rr(0.5, 2) * rs, Math.cos(a) * v, Math.sin(a) * v, rr(5, 15) * rs, rr(0.45, 1.0), rr(0.3, 0.5) * rs, 0.2, 1, rr(0.65, 0.9), 0.3, 1, 22, 1);
   }
   const nSm = clamp(Math.round(6 * s), 3, 20);
   for (let k = 0; k < nSm; k++) {
     const a = Math.random() * 6.2832, d = rr(0, size * 0.22), g = rr(0.2, 0.3);
-    emit(x + Math.cos(a) * d, y + Math.sin(a) * d, rr(1, 3) * rs, Math.cos(a) * rr(1, 3), Math.sin(a) * rr(1, 3), rr(2.5, 5) * rs, rr(2.2, 4.2) * Math.min(rs, 2),
+    emit(x + Math.cos(a) * d, y + Math.sin(a) * d, z + rr(1, 3) * rs, Math.cos(a) * rr(1, 3), Math.sin(a) * rr(1, 3), rr(2.5, 5) * rs, rr(2.2, 4.2) * Math.min(rs, 2),
       size * 0.18, Math.min(size * 0.45, 26), g, g * 0.95, g * 0.9, 0.62, 0, 2);
   }
-  // 地面揚起的塵環
+  // 地面揚起的塵環（打在屋頂上就沒有）
+  if (!ground) return;
   const nD = clamp(Math.round(8 * rs), 6, 20);
   for (let k = 0; k < nD; k++) {
     const a = (k / nD) * 6.2832, v = rr(6, 10) * rs;

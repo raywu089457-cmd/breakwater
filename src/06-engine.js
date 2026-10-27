@@ -55,7 +55,7 @@ const dmapB = buf(NN * NN, GBU.STORAGE | GBU.COPY_DST, new Uint32Array(dmap.buff
 const distTex = device.createTexture({ size: [NN, NN], format: 'r8uint', usage: GTU.TEXTURE_BINDING | GTU.COPY_DST });
 device.queue.writeTexture({ texture: distTex }, dmap, { bytesPerRow: NN }, [NN, NN]);
 const MAX_FX = 64;
-const fxB = buf(MAX_FX * 16, GBU.STORAGE | GBU.COPY_DST);
+const fxB = buf(MAX_FX * 32, GBU.STORAGE | GBU.COPY_DST);   // 每個爆炸 2 個 vec4：(x, y, 寬, 開始時間) (高度, 0, 0, 0)
 const agentsB = buf(MAX_AGENTS * 16, GBU.STORAGE | GBU.COPY_DST | GBU.COPY_SRC);   // COPY_SRC：存檔要讀回來
 const infoB = buf(MAX_AGENTS * 8, GBU.STORAGE | GBU.COPY_DST | GBU.COPY_SRC);
 const densB = buf(WN * WN * 4, GBU.STORAGE | GBU.COPY_DST);
@@ -87,6 +87,9 @@ const MAX_MARKS = 512;
 const markB = buf(MAX_MARKS * 32, GBU.STORAGE | GBU.COPY_DST);
 const blitU = buf(16, GBU.UNIFORM | GBU.COPY_DST);
 const ctrRead = device.createBuffer({ size: CTR_WORDS * 4, usage: GBU.MAP_READ | GBU.COPY_DST });
+const KILL_BYTES = 16 + KILL_CAP * 16;
+const killB = buf(KILL_BYTES, GBU.STORAGE | GBU.COPY_SRC | GBU.COPY_DST);
+const killRead = device.createBuffer({ size: KILL_BYTES, usage: GBU.MAP_READ | GBU.COPY_DST });
 let qs = null, tsResolve = null, tsRead = null;
 if (hasTS) {
   qs = device.createQuerySet({ type: 'timestamp', count: 4 });
@@ -134,7 +137,7 @@ const countBG = bg(countP, [simU[0], agentsB, infoB, densB, coarseB]);
 const seedBG = bg(seedP, [simU[0], seedB]);
 const relaxBG = [bg(relaxP, [costB, seedB, distA, distB]), bg(relaxP, [costB, seedB, distB, distA])];
 const flowBG = bg(flowP, [distA, flowB]);
-const moveBG = simU.map((u) => bg(moveP, [u, agentsB, infoB, densB, flowB, typeTex, countersB, pileA, wallIdTex]));
+const moveBG = simU.map((u) => bg(moveP, [u, agentsB, infoB, densB, flowB, typeTex, countersB, pileA, wallIdTex, killB]));
 const probeBG = bg(probeP, [simU[0], densB, pileA, countersB]);
 const ptileB = buf(MAX_PTILES * 4, GBU.STORAGE | GBU.COPY_DST);
 const ptileArr = new Uint32Array(MAX_PTILES);
@@ -229,7 +232,7 @@ function setAgents(n) {
 
 // ----- 每幀 -----
 const gpuMs = { sim: 0, render: 0 };
-let ctrBusy = false, tsBusy = false, frames = 0;
+let ctrBusy = false, tsBusy = false, killBusy = false, frames = 0;
 const rU = new Float32Array(120);
 const dcolArr = new Float32Array(64);
 // 依畫面上的精靈高度挑最接近、不超過 1.2 倍縮小的 LOD 層
@@ -253,7 +256,7 @@ function encodeFrame(dtReal, marks, fxList, unitList) {
   if (simRan) {
     updatePileTiles();
     for (let s = 0; s < sub; s++) { sim.time += dt; writeSim(s, dt, s === sub - 1, s === 0, (dt * sub) / 2); }
-    sim.strikesOnce.length = 0;
+    sim.strikesOnce.splice(0, MAX_ONCE);   // 一幀超過上限的留到下一幀，不會有畫面炸了、喪屍沒死的情況
     enc.clearBuffer(countersB, 0, 4);
     enc.clearBuffer(countersB, 8, CTR_WORDS * 4 - 8);
     const np = enc.beginComputePass(ts(0, null));
@@ -304,8 +307,8 @@ function encodeFrame(dtReal, marks, fxList, unitList) {
   if (nMarks) device.queue.writeBuffer(markB, 0, marks, 0, nMarks * 8);
   const nUnits = Math.min(MAX_UNITS, unitList.length / 12);
   if (nUnits) device.queue.writeBuffer(unitB, 0, unitList, 0, nUnits * 12);
-  const nFx = Math.min(MAX_FX, fxList.length / 4);
-  if (nFx) device.queue.writeBuffer(fxB, 0, fxList, 0, nFx * 4);
+  const nFx = Math.min(MAX_FX, fxList.length / 8);
+  if (nFx) device.queue.writeBuffer(fxB, 0, fxList, 0, nFx * 8);
   if (showAgents) {
     device.queue.writeBuffer(indirectB, 0, new Uint32Array([6, 0, 0, 0]));
     const cp = enc.beginComputePass(ts(2, null));
@@ -330,6 +333,9 @@ function encodeFrame(dtReal, marks, fxList, unitList) {
   // 讀回（非同步，不卡畫面）
   const readCtr = !ctrBusy && frames % 6 === 0;
   if (readCtr) { enc.copyBufferToBuffer(countersB, 0, ctrRead, 0, CTR_WORDS * 4); enc.copyBufferToBuffer(indirectB, 4, ctrRead, 8, 4); }
+  // 擊殺紀錄每幀讀（讀走就清空；上一次還沒讀完就先累積著）
+  const readKill = !killBusy && simRan;
+  if (readKill) { enc.copyBufferToBuffer(killB, 0, killRead, 0, KILL_BYTES); enc.clearBuffer(killB, 0, 16); }
   const readTs = hasTS && !tsBusy;
   if (readTs) { enc.resolveQuerySet(qs, 0, 4, tsResolve, 0); enc.copyBufferToBuffer(tsResolve, 0, tsRead, 0, 32); }
   device.queue.submit([enc.finish()]);
@@ -350,6 +356,16 @@ function encodeFrame(dtReal, marks, fxList, unitList) {
       }
       sim.kills = u[1]; sim.visible = shown ? u[2] : 0;
     }).catch(() => { ctrBusy = false; });
+  }
+  if (readKill) {
+    killBusy = true;
+    killRead.mapAsync(GPUMapMode.READ).then(() => {
+      const raw = killRead.getMappedRange();
+      const n = Math.min(new Uint32Array(raw, 0, 1)[0], KILL_CAP);
+      const e = n ? new Float32Array(raw.slice(16, 16 + n * 16)) : null;
+      killRead.unmap(); killBusy = false;
+      if (e) onKills(e, n);
+    }).catch(() => { killBusy = false; });
   }
   if (readTs) {
     tsBusy = true;

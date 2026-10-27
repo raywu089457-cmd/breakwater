@@ -349,17 +349,18 @@ struct MO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) 
 // 爆炸：8 格動畫 billboard，腳底貼地，不受光（自發光）
 const WGSL_FX = WGSL_RCOMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> U: R;
-@group(0) @binding(1) var<storage, read> fx: array<vec4f>;   // x, y, 寬(m), 開始時間
+@group(0) @binding(1) var<storage, read> fx: array<vec4f>;   // 每個 2 格：(x, y, 寬(m), 開始時間) (高度, 0, 0, 0)
 @group(0) @binding(2) var atlasTex: texture_2d<f32>;
 struct FO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) @interpolate(flat) fr: u32 };
 @vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> FO {
-  let e = fx[ii];
+  let e = fx[ii * 2u];
+  let ez = fx[ii * 2u + 1u].x;
   var quad = array<vec2f, 6>(vec2f(0.0, 0.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0), vec2f(0.0, 0.0), vec2f(1.0, 1.0), vec2f(0.0, 1.0));
   let q = quad[vi];
   let age = U.misc.x - e.w;
   var o: FO;
-  let foot = vec3f(e.xy, 0.0) + U.back.xyz * 1.0;
-  let sv = (q.y - 0.04) * e.z * U.sizes.z;
+  let foot = vec3f(e.xy, ez) + U.back.xyz * 1.0;
+  let sv = (q.y - 0.015) * e.z * U.sizes.z;   // 爆炸圖最底下一排是空的：火球底部剛好落在命中點
   let wp = foot + U.right.xyz * (q.x - 0.5) * e.z + U.up.xyz * sv + U.back.xyz * (max(sv, 0.0) * min(tan(U.misc.w), 2.5));
   o.pos = U.vp * vec4f(wp, 1.0);
   o.uv = q;

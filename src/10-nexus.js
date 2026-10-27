@@ -204,7 +204,7 @@ function rerouteAround(b) {
   let n = 0;
   for (const u of units) {
     if (isAir(u) || !u.path.length || !pathHits(u, b)) continue;
-    const p = findPath(u.x, u.y, u.tx, u.ty);
+    const p = pathFor(u, u.tx, u.ty);
     if (p) { u.path = p; if (!pathHits(u, b)) n++; }
   }
   return n;

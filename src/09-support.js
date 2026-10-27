@@ -1,9 +1,9 @@
 // ---------- 火力支援：砲兵、艦砲、空襲、戰斧飛彈（會誤傷自己人） ----------
 const SUP = {
-  artillery: { name: '砲兵', delay: 3, cd: 18, rounds: 6, spread: 20, r: 11, lethal: 0.9, every: 0.3, fx: 22 },
-  naval: { name: '艦砲', delay: 5, cd: 28, rounds: 12, spread: 26, r: 11, lethal: 0.92, every: 0.4, fx: 20 },
-  air: { name: '空襲', delay: 6, cd: 45, rounds: 8, len: 220, r: 13, lethal: 0.93, fx: 26 },
-  tomahawk: { name: '戰斧', delay: 12, cd: 90, r: 42, lethal: 0.97, fx: 95 },
+  artillery: { name: '砲兵', delay: 3, cd: 18, rounds: 6, spread: 20, r: 11, lethal: 0.9, every: 0.3 },
+  naval: { name: '艦砲', delay: 5, cd: 28, rounds: 12, spread: 26, r: 11, lethal: 0.92, every: 0.4 },
+  air: { name: '空襲', delay: 6, cd: 45, rounds: 8, len: 220, r: 13, lethal: 0.93 },
+  tomahawk: { name: '戰斧', delay: 12, cd: 90, r: 42, lethal: 0.97 },
 };
 const SUP_KEYS = { KeyZ: 'artillery', KeyX: 'naval', KeyC: 'air', KeyV: 'tomahawk' };
 // 外海艦隊（純畫面＋艦砲/飛彈的發射點）
@@ -27,12 +27,9 @@ function callSupport(type, x, y, x2, y2) {
   support.missions.push(m);
   return true;
 }
-// 爆炸：殺喪屍＋特效＋焦痕＋震動＋誤傷
-function boom(x, y, r, lethal, fx, shake) {
-  sim.strikesOnce.push([x, y, r, lethal]);
-  game.fx.push([x, y, fx, sim.time]);
-  fxExplosion(x, y, fx);
-  game.marks.push({ type: 3, x, y, r: r * 0.75, life: 90, max: 90 });
+// 爆炸：殺喪屍＋特效＋焦痕＋震動＋誤傷（殺傷跟畫面同一個點，見 detonate）
+function boom(x, y, r, lethal, shake, z = 0) {
+  detonate(x, y, r, lethal, z);
   support.shake = Math.max(support.shake, shake);
   for (const u of [...units]) {
     const d = Math.hypot(u.x - x, u.y - y);
@@ -40,13 +37,17 @@ function boom(x, y, r, lethal, fx, shake) {
     if (u.type === 'squad') {
       let lost = 0;
       for (let k = 0; k < u.men; k++) {
-        const [ox, oy] = soldierOffset(u, k), dd = Math.hypot(u.x + ox - x, u.y + oy - y);
-        if (dd < r && Math.random() < lethal * (1 - dd / r)) { lost++; fxSoldierDown(u.x + ox, u.y + oy); }
+        const [sx, sy] = soldierPos(u, k), dd = Math.hypot(sx - x, sy - y);
+        if (dd < r && Math.random() < lethal * (1 - dd / r)) { lost++; fxSoldierDown(sx, sy); }
       }
       if (lost) { u.men -= lost; game.lost += lost; game.friendly = (game.friendly || 0) + lost; if (u.men <= 0) removeUnit(u); }
     } else if (u.type === 'tank' && d < r) { u.hp -= 900 * (1 - d / r); game.friendly = (game.friendly || 0) + 1; }
     else if (u.type === 'heli' && d < r && u.z < 12) { u.hp -= 80 * (1 - d / r); }
   }
+}
+// 砲彈在第 s（0..1）段飛行時的位置：直線，艦砲（低平彈道）再加一點拋物線。畫面跟撞樓判定共用
+function shellAt(sh, s) {
+  return [lerp(sh.from[0], sh.tx, s), lerp(sh.from[1], sh.ty, s), lerp(sh.from[2], 0, s) + (sh.from[2] < 20 ? 60 * s * (1 - s) : 0)];
 }
 const gauss2 = () => { const a = Math.random() * 6.2831853, r = Math.sqrt(-2 * Math.log(Math.random() + 1e-9)) * 0.5; return [Math.cos(a) * r, Math.sin(a) * r]; };
 
@@ -63,7 +64,7 @@ function updateSupport(sdt) {
         const [gx, gy] = gauss2();
         const tx = m.x + gx * s.spread, ty = m.y + gy * s.spread;
         const from = m.type === 'naval' ? [FLEET.destroyer[0] + 24, FLEET.destroyer[1], 6] : [tx - 40, ty - 60, 140];
-        support.shells.push({ tx, ty, from, t: 0, dur: m.type === 'naval' ? 0.9 : 0.5, r: s.r, lethal: s.lethal, fx: s.fx });
+        support.shells.push({ tx, ty, from, t: 0, dur: m.type === 'naval' ? 0.9 : 0.5, r: s.r, lethal: s.lethal });
         if (m.type === 'naval') game.fx.push([FLEET.destroyer[0] + 26, FLEET.destroyer[1] + 1, 7, sim.time]);
         m.fired++; m.next += s.every;
       }
@@ -84,10 +85,14 @@ function updateSupport(sdt) {
     }
   }
   support.missions = support.missions.filter((m) => !m.done);
-  // 砲彈飛行
+  // 砲彈飛行：這一幀飛過的那段如果穿進建築（低於屋頂），就在撞點炸；沒撞到就落在目標點
   for (const sh of support.shells) {
+    const a = shellAt(sh, Math.min(1, sh.t / sh.dur));
     sh.t += sdt;
-    if (sh.t >= sh.dur && !sh.hit) { sh.hit = true; boom(sh.tx, sh.ty, sh.r, sh.lethal, sh.fx, 0.25); }
+    const b = shellAt(sh, Math.min(1, sh.t / sh.dur));
+    const hit = rayHitBuilding(a[0], a[1], a[2], b[0], b[1], b[2]);
+    if (hit) { sh.hit = true; boom(hit[0], hit[1], sh.r, sh.lethal, 0.25, hit[2]); }
+    else if (sh.t >= sh.dur && !sh.hit) { sh.hit = true; boom(sh.tx, sh.ty, sh.r, sh.lethal, 0.25); }
   }
   support.shells = support.shells.filter((sh) => !sh.hit);
   // 噴射機
@@ -96,7 +101,7 @@ function updateSupport(sdt) {
     const s = SUP.air, along = (j.x - j.m.x0) * j.dx + (j.y - j.m.y0) * j.dy;
     while (j.dropped < s.rounds && along >= (j.dropped / (s.rounds - 1)) * s.len) {
       const bx = j.m.x0 + j.dx * (j.dropped / (s.rounds - 1)) * s.len, by = j.m.y0 + j.dy * (j.dropped / (s.rounds - 1)) * s.len;
-      support.shells.push({ tx: bx, ty: by, from: [bx - j.dx * 40, by - j.dy * 40, 30], t: 0, dur: 0.45, r: s.r, lethal: s.lethal, fx: s.fx });
+      support.shells.push({ tx: bx, ty: by, from: [bx - j.dx * 40, by - j.dy * 40, 30], t: 0, dur: 0.45, r: s.r, lethal: s.lethal });
       j.dropped++;
     }
     if (along > s.len + 450) j.gone = true;
@@ -105,10 +110,13 @@ function updateSupport(sdt) {
   // 戰斧：從航艦起飛、拉高、俯衝；尾煙
   for (const ms of support.missiles) {
     ms.t += sdt;
-    const p = Math.min(1, ms.t / ms.dur);
-    ms.x = lerp(ms.sx, ms.tx, p); ms.y = lerp(ms.sy, ms.ty, p); ms.z = 10 + 260 * p * (1 - p);
+    const p = Math.min(1, ms.t / ms.dur), s = SUP.tomahawk;
+    const px = ms.x ?? ms.sx, py = ms.y ?? ms.sy, pz = ms.z ?? 10;
+    ms.x = lerp(ms.sx, ms.tx, p); ms.y = lerp(ms.sy, ms.ty, p); ms.z = 10 * (1 - p) + 260 * p * (1 - p);   // 最後俯衝到地面
     if (Math.random() < 0.9) support.trail.push([ms.x, ms.y, ms.z, 1.2]);
-    if (p >= 1 && !ms.hit) { ms.hit = true; const s = SUP.tomahawk; boom(ms.tx, ms.ty, s.r, s.lethal, s.fx, 1.0); }
+    const hit = !ms.hit && rayHitBuilding(px, py, pz, ms.x, ms.y, ms.z);
+    if (hit) { ms.hit = true; boom(hit[0], hit[1], s.r, s.lethal, 1.0, hit[2]); }
+    else if (p >= 1 && !ms.hit) { ms.hit = true; boom(ms.tx, ms.ty, s.r, s.lethal, 1.0); }
   }
   support.missiles = support.missiles.filter((ms) => !ms.hit);
   for (const tp of support.trail) tp[3] -= sdt;
@@ -125,8 +133,7 @@ function pushSupportInstances(push) {
   }
   for (const sh of support.shells) {
     const p = Math.min(1, sh.t / sh.dur), q = Math.max(0, p - 0.12);
-    const at = (s) => [lerp(sh.from[0], sh.tx, s), lerp(sh.from[1], sh.ty, s), lerp(sh.from[2], 0, s) + (sh.from[2] < 20 ? 60 * s * (1 - s) : 0)];
-    const a = at(q), b = at(p);
+    const a = shellAt(sh, q), b = shellAt(sh, p);
     push([a[0], a[1], a[2], 2], [b[0], b[1], b[2], 4], [1, 0.85, 0.55, 0.95]);
   }
   for (const tp of support.trail) push([tp[0], tp[1], tp[2], 3], [tp[0] + 1.5, tp[1] + 1.5, tp[2] + 0.5, 4], [0.75, 0.75, 0.75, 0.5 * tp[3]]);

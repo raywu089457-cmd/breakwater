@@ -65,7 +65,7 @@ function orderAt(x, y) {
 function routeTo(u, x, y) {
   u.tx = x; u.ty = y;
   if (isAir(u)) { u.tz = 40; u.landed = false; u.path = []; return true; }
-  const p = findPath(u.x, u.y, x, y);
+  const p = pathFor(u, x, y);
   if (!p) { logEvent(`${UT[u.type].name} 無法到達目的地，任務取消`, 'bad'); u.mission = null; u.phase = null; u.path = []; return false; }
   u.path = p;
   return true;

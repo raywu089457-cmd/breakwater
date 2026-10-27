@@ -143,6 +143,8 @@ const SHELTER_SLOT0 = 20;   // 探測槽：0–19 部隊、20+ 避難所
 // 牆板與破牆者：牆切成 PANEL 公尺一片，各 PANEL_HP 耐久；每 1024 隻有 BRUTE_K 隻是破牆者（大隻、慢、不爬牆，頂著牆板每秒扣 BRUTE_DPS）
 // counters 在探測之後接 WALL_BASE + 牆板編號：這一幀頂著那片牆板的破牆者數
 const WALL_BASE = PROBE_BASE + MAX_SUNITS * 8, MAX_PANELS = 2048, PANEL = 4, PANEL_HP = 100, BRUTE_K = 4, BRUTE_DPS = 1;
+// 擊殺紀錄：GPU 每打死一隻就記下位置與來源（殺傷區 k、單次砲擊 100+k、射擊線 200+k），每幀讀回來畫曳光彈／血花，畫面跟模擬算到的位置一致
+const KILL_CAP = 1024;
 const PTILE = 32;                 // 屍堆計算區塊邊長（公尺）
 const PTN = WN / PTILE;           // 每邊區塊數
 const MAX_PTILES = 4096;
@@ -688,6 +690,8 @@ const WGSL_MOVE = WGSL_COMMON + /* wgsl */`
 @group(0) @binding(6) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read> pile: array<f32>;
 @group(0) @binding(8) var wallIds: texture_2d<u32>;
+struct KillLog { n: atomic<u32>, p0: u32, p1: u32, p2: u32, e: array<vec4f, ${KILL_CAP}> };   // e：x, y, 來源, 時間
+@group(0) @binding(9) var<storage, read_write> killLog: KillLog;
 var<workgroup> wAlive: atomic<u32>;
 var<workgroup> wKills: atomic<u32>;
 var<workgroup> wClimb: atomic<u32>;
@@ -698,6 +702,14 @@ fn tileAt(c: vec2i) -> u32 {
 }
 fn hard(t: u32) -> bool { return t == 1u || t == 2u; }
 fn blockedAt(c: vec2i) -> bool { let t = tileAt(c); return hard(t) || t == 7u; }
+// 地面射手的視線：從喪屍往射手每 1.5 m 取樣，中間隔著建築就打不到（牆 4 m，打得過去）
+fn losClear(a: vec2f, b: vec2f) -> bool {
+  let n = u32(ceil(distance(a, b) / 1.5));
+  for (var s = 1u; s < n; s++) {
+    if (tileAt(vec2i(floor(mix(a, b, f32(s) / f32(n))))) == 1u) { return false; }
+  }
+  return true;
+}
 fn pileAt(c: vec2i) -> f32 {
   let q = clamp(c, vec2i(0), vec2i(i32(WN) - 1));
   return pile[u32(q.y) * WN + u32(q.x)];
@@ -745,12 +757,14 @@ fn stepAgent(i: u32) {
   let rbase = pcg(i ^ (tick * 2654435761u));
   var dead = false;
   var fling = vec2f(0.0);
+  var src = 0u;
   for (var k = 0u; k < S.nZones && !dead; k++) {
     let s = S.zones[k];
     let d = distance(p, s.xy);
-    if (d >= s.z) { continue; }
+    if (d >= abs(s.z)) { continue; }
+    if (s.z < 0.0 && !losClear(p, s.xy)) { continue; }   // 半徑負的＝地面射手，要看得到
     if (last) { atomicAdd(&counters[${ZONE_BASE}u + k], 1u); }   // 區內數量（讀回去算命中率）
-    if (rnd(rbase + k * 7919u) < s.w * S.dt) { dead = true; if (d > 0.01) { fling = (p - s.xy) / d * 0.3; } }
+    if (rnd(rbase + k * 7919u) < s.w * S.dt) { dead = true; src = k; if (d > 0.01) { fling = (p - s.xy) / d * 0.3; } }
   }
   if ((S.flags & 2u) != 0u) {
     for (var k = 0u; k < S.nOnce && !dead; k++) {
@@ -758,7 +772,7 @@ fn stepAgent(i: u32) {
       let d = distance(p, s.xy);
       if (d >= s.z) { continue; }
       let q = d / s.z;
-      if (rnd(rbase + k * 104729u + 17u) < s.w * (1.0 - 0.75 * q * q)) { dead = true; if (d > 0.01) { fling = (p - s.xy) / d * (1.0 - q) * 3.0; } }
+      if (rnd(rbase + k * 104729u + 17u) < s.w * (1.0 - 0.75 * q * q)) { dead = true; src = 100u + k; if (d > 0.01) { fling = (p - s.xy) / d * (1.0 - q) * 3.0; } }
     }
   }
   for (var k = 0u; k < S.nLines && !dead; k++) {
@@ -768,9 +782,11 @@ fn stepAgent(i: u32) {
     let d = distance(p, a0.xy + ab * t);
     if (d >= a1.x) { continue; }
     if (last) { atomicAdd(&counters[${LINE_BASE}u + k], 1u); }
-    if (rnd(rbase + k * 31337u + 5u) < a1.y * S.dt) { dead = true; fling = normalize(ab + vec2f(1e-4)) * 0.4; }
+    if (rnd(rbase + k * 31337u + 5u) < a1.y * S.dt) { dead = true; src = 200u + k; fling = normalize(ab + vec2f(1e-4)) * 0.4; }
   }
   if (dead) {
+    let w = atomicAdd(&killLog.n, 1u);
+    if (w < ${KILL_CAP}u) { killLog.e[w] = vec4f(p, f32(src), S.time); }
     var cp = p + fling;
     if (blockedAt(vec2i(floor(cp)))) { cp = p; }
     agents[i] = vec4f(cp, 0.0, 0.0);
@@ -903,21 +919,22 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: vec3u
 `;
 
 // 單位探測：每個單位一個工作群組，掃周圍 96×96 m。寫進 counters[PROBE_BASE + k*8 + …]：
-// 0 接觸半徑內喪屍數、1 48 m 內喪屍數、2/3 它們相對位置總和（各加 64 免得負數）、4 8 m 內最高屍堆（公分）
+// 0 接觸半徑內喪屍數、1 48 m 內喪屍數、2/3 它們相對位置總和（各加 64 免得負數）、4 8 m 內最高屍堆（公分）、
+// 5 8–48 m 內最密的 3×3 m（高 10 位＝隻數、低 22 位＝中心格編號）：戰車主砲瞄這裡，不瞄可能是空地的重心
 const WGSL_PROBE = WGSL_COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> S: Sim;
 @group(0) @binding(1) var<storage, read> dens: array<u32>;
 @group(0) @binding(2) var<storage, read> pile: array<f32>;
 @group(0) @binding(3) var<storage, read_write> counters: array<atomic<u32>>;
-var<workgroup> wc: array<atomic<u32>, 5>;
+var<workgroup> wc: array<atomic<u32>, 6>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u32) {
   let k = wg.x;
-  if (li < 5u) { atomicStore(&wc[li], 0u); }
+  if (li < 6u) { atomicStore(&wc[li], 0u); }
   workgroupBarrier();
   let u = S.units[k];
   let base = vec2i(floor(u.xy)) - vec2i(48);
-  var contact = 0u; var inr = 0u; var sx = 0u; var sy = 0u; var mp = 0u;
+  var contact = 0u; var inr = 0u; var sx = 0u; var sy = 0u; var mp = 0u; var best = 0u;
   for (var j = li; j < 9216u; j += 256u) {
     let c = base + vec2i(i32(j % 96u), i32(j / 96u));
     if (c.x < 0 || c.y < 0 || c.x >= i32(WN) || c.y >= i32(WN)) { continue; }
@@ -929,10 +946,15 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
     if (n == 0u) { continue; }
     if (d < u.w) { contact += n; }
     if (d < 48.0) { inr += n; sx += n * u32(off.x + 64.0); sy += n * u32(off.y + 64.0); }
+    if (d > 8.0 && d < 48.0 && c.x > 0 && c.y > 0 && c.x < i32(WN) - 1 && c.y < i32(WN) - 1) {
+      var s3 = 0u;
+      for (var oy = -1; oy <= 1; oy++) { for (var ox = -1; ox <= 1; ox++) { s3 += dens[u32(c.y + oy) * WN + u32(c.x + ox)]; } }
+      best = max(best, (min(s3, 1023u) << 22u) | idx);
+    }
   }
-  atomicAdd(&wc[0], contact); atomicAdd(&wc[1], inr); atomicAdd(&wc[2], sx); atomicAdd(&wc[3], sy); atomicMax(&wc[4], mp);
+  atomicAdd(&wc[0], contact); atomicAdd(&wc[1], inr); atomicAdd(&wc[2], sx); atomicAdd(&wc[3], sy); atomicMax(&wc[4], mp); atomicMax(&wc[5], best);
   workgroupBarrier();
-  if (li < 5u) { atomicStore(&counters[${PROBE_BASE}u + k * 8u + li], atomicLoad(&wc[li])); }
+  if (li < 6u) { atomicStore(&counters[${PROBE_BASE}u + k * 8u + li], atomicLoad(&wc[li])); }
 }
 `;
 
@@ -1337,17 +1359,18 @@ struct MO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) 
 // 爆炸：8 格動畫 billboard，腳底貼地，不受光（自發光）
 const WGSL_FX = WGSL_RCOMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> U: R;
-@group(0) @binding(1) var<storage, read> fx: array<vec4f>;   // x, y, 寬(m), 開始時間
+@group(0) @binding(1) var<storage, read> fx: array<vec4f>;   // 每個 2 格：(x, y, 寬(m), 開始時間) (高度, 0, 0, 0)
 @group(0) @binding(2) var atlasTex: texture_2d<f32>;
 struct FO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) @interpolate(flat) fr: u32 };
 @vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> FO {
-  let e = fx[ii];
+  let e = fx[ii * 2u];
+  let ez = fx[ii * 2u + 1u].x;
   var quad = array<vec2f, 6>(vec2f(0.0, 0.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0), vec2f(0.0, 0.0), vec2f(1.0, 1.0), vec2f(0.0, 1.0));
   let q = quad[vi];
   let age = U.misc.x - e.w;
   var o: FO;
-  let foot = vec3f(e.xy, 0.0) + U.back.xyz * 1.0;
-  let sv = (q.y - 0.04) * e.z * U.sizes.z;
+  let foot = vec3f(e.xy, ez) + U.back.xyz * 1.0;
+  let sv = (q.y - 0.015) * e.z * U.sizes.z;   // 爆炸圖最底下一排是空的：火球底部剛好落在命中點
   let wp = foot + U.right.xyz * (q.x - 0.5) * e.z + U.up.xyz * sv + U.back.xyz * (max(sv, 0.0) * min(tan(U.misc.w), 2.5));
   o.pos = U.vp * vec4f(wp, 1.0);
   o.uv = q;
@@ -1562,7 +1585,7 @@ const dmapB = buf(NN * NN, GBU.STORAGE | GBU.COPY_DST, new Uint32Array(dmap.buff
 const distTex = device.createTexture({ size: [NN, NN], format: 'r8uint', usage: GTU.TEXTURE_BINDING | GTU.COPY_DST });
 device.queue.writeTexture({ texture: distTex }, dmap, { bytesPerRow: NN }, [NN, NN]);
 const MAX_FX = 64;
-const fxB = buf(MAX_FX * 16, GBU.STORAGE | GBU.COPY_DST);
+const fxB = buf(MAX_FX * 32, GBU.STORAGE | GBU.COPY_DST);   // 每個爆炸 2 個 vec4：(x, y, 寬, 開始時間) (高度, 0, 0, 0)
 const agentsB = buf(MAX_AGENTS * 16, GBU.STORAGE | GBU.COPY_DST | GBU.COPY_SRC);   // COPY_SRC：存檔要讀回來
 const infoB = buf(MAX_AGENTS * 8, GBU.STORAGE | GBU.COPY_DST | GBU.COPY_SRC);
 const densB = buf(WN * WN * 4, GBU.STORAGE | GBU.COPY_DST);
@@ -1594,6 +1617,9 @@ const MAX_MARKS = 512;
 const markB = buf(MAX_MARKS * 32, GBU.STORAGE | GBU.COPY_DST);
 const blitU = buf(16, GBU.UNIFORM | GBU.COPY_DST);
 const ctrRead = device.createBuffer({ size: CTR_WORDS * 4, usage: GBU.MAP_READ | GBU.COPY_DST });
+const KILL_BYTES = 16 + KILL_CAP * 16;
+const killB = buf(KILL_BYTES, GBU.STORAGE | GBU.COPY_SRC | GBU.COPY_DST);
+const killRead = device.createBuffer({ size: KILL_BYTES, usage: GBU.MAP_READ | GBU.COPY_DST });
 let qs = null, tsResolve = null, tsRead = null;
 if (hasTS) {
   qs = device.createQuerySet({ type: 'timestamp', count: 4 });
@@ -1641,7 +1667,7 @@ const countBG = bg(countP, [simU[0], agentsB, infoB, densB, coarseB]);
 const seedBG = bg(seedP, [simU[0], seedB]);
 const relaxBG = [bg(relaxP, [costB, seedB, distA, distB]), bg(relaxP, [costB, seedB, distB, distA])];
 const flowBG = bg(flowP, [distA, flowB]);
-const moveBG = simU.map((u) => bg(moveP, [u, agentsB, infoB, densB, flowB, typeTex, countersB, pileA, wallIdTex]));
+const moveBG = simU.map((u) => bg(moveP, [u, agentsB, infoB, densB, flowB, typeTex, countersB, pileA, wallIdTex, killB]));
 const probeBG = bg(probeP, [simU[0], densB, pileA, countersB]);
 const ptileB = buf(MAX_PTILES * 4, GBU.STORAGE | GBU.COPY_DST);
 const ptileArr = new Uint32Array(MAX_PTILES);
@@ -1736,7 +1762,7 @@ function setAgents(n) {
 
 // ----- 每幀 -----
 const gpuMs = { sim: 0, render: 0 };
-let ctrBusy = false, tsBusy = false, frames = 0;
+let ctrBusy = false, tsBusy = false, killBusy = false, frames = 0;
 const rU = new Float32Array(120);
 const dcolArr = new Float32Array(64);
 // 依畫面上的精靈高度挑最接近、不超過 1.2 倍縮小的 LOD 層
@@ -1760,7 +1786,7 @@ function encodeFrame(dtReal, marks, fxList, unitList) {
   if (simRan) {
     updatePileTiles();
     for (let s = 0; s < sub; s++) { sim.time += dt; writeSim(s, dt, s === sub - 1, s === 0, (dt * sub) / 2); }
-    sim.strikesOnce.length = 0;
+    sim.strikesOnce.splice(0, MAX_ONCE);   // 一幀超過上限的留到下一幀，不會有畫面炸了、喪屍沒死的情況
     enc.clearBuffer(countersB, 0, 4);
     enc.clearBuffer(countersB, 8, CTR_WORDS * 4 - 8);
     const np = enc.beginComputePass(ts(0, null));
@@ -1811,8 +1837,8 @@ function encodeFrame(dtReal, marks, fxList, unitList) {
   if (nMarks) device.queue.writeBuffer(markB, 0, marks, 0, nMarks * 8);
   const nUnits = Math.min(MAX_UNITS, unitList.length / 12);
   if (nUnits) device.queue.writeBuffer(unitB, 0, unitList, 0, nUnits * 12);
-  const nFx = Math.min(MAX_FX, fxList.length / 4);
-  if (nFx) device.queue.writeBuffer(fxB, 0, fxList, 0, nFx * 4);
+  const nFx = Math.min(MAX_FX, fxList.length / 8);
+  if (nFx) device.queue.writeBuffer(fxB, 0, fxList, 0, nFx * 8);
   if (showAgents) {
     device.queue.writeBuffer(indirectB, 0, new Uint32Array([6, 0, 0, 0]));
     const cp = enc.beginComputePass(ts(2, null));
@@ -1837,6 +1863,9 @@ function encodeFrame(dtReal, marks, fxList, unitList) {
   // 讀回（非同步，不卡畫面）
   const readCtr = !ctrBusy && frames % 6 === 0;
   if (readCtr) { enc.copyBufferToBuffer(countersB, 0, ctrRead, 0, CTR_WORDS * 4); enc.copyBufferToBuffer(indirectB, 4, ctrRead, 8, 4); }
+  // 擊殺紀錄每幀讀（讀走就清空；上一次還沒讀完就先累積著）
+  const readKill = !killBusy && simRan;
+  if (readKill) { enc.copyBufferToBuffer(killB, 0, killRead, 0, KILL_BYTES); enc.clearBuffer(killB, 0, 16); }
   const readTs = hasTS && !tsBusy;
   if (readTs) { enc.resolveQuerySet(qs, 0, 4, tsResolve, 0); enc.copyBufferToBuffer(tsResolve, 0, tsRead, 0, 32); }
   device.queue.submit([enc.finish()]);
@@ -1857,6 +1886,16 @@ function encodeFrame(dtReal, marks, fxList, unitList) {
       }
       sim.kills = u[1]; sim.visible = shown ? u[2] : 0;
     }).catch(() => { ctrBusy = false; });
+  }
+  if (readKill) {
+    killBusy = true;
+    killRead.mapAsync(GPUMapMode.READ).then(() => {
+      const raw = killRead.getMappedRange();
+      const n = Math.min(new Uint32Array(raw, 0, 1)[0], KILL_CAP);
+      const e = n ? new Float32Array(raw.slice(16, 16 + n * 16)) : null;
+      killRead.unmap(); killBusy = false;
+      if (e) onKills(e, n);
+    }).catch(() => { killBusy = false; });
   }
   if (readTs) {
     tsBusy = true;
@@ -2073,6 +2112,167 @@ const livePanels = () => walls.reduce((s, w) => s + w.panels.filter(Boolean).len
 const wallLength = () => walls.reduce((s, w) => s + w.panels.reduce((t, p) => t + (p ? Math.max(p.x1 - p.x0, p.y1 - p.y0) : 0), 0), 0);
 const damagedPanels = () => walls.reduce((s, w) => s + w.panels.filter((p) => p && p.hp < PANEL_HP).length, 0);
 
+// ---------- 碰撞：單位 ↔ 建築／牆／水、單位 ↔ 單位、砲彈 ↔ 建築 —— 全在 CPU，只跟單位數（≤ 20）有關，跟喪屍數量無關 ----------
+// 單位用圓形：半徑也是單位之間互推的距離；質量大的推得動質量小的
+const UR = { squad: 2.2, tank: 3.0, truck: 2.5, heli: 6, transport: 6.5 };
+const UMASS = { squad: 1, tank: 5, truck: 3, heli: 1, transport: 1.5 };
+const NEST_R = 2.6;   // 機槍堡（沙包）對地面部隊來說也是障礙
+const hardTile = (v) => v === T.BUILDING || v === T.WATER || v === T.WALL;
+const hardAt = (x, y) => x < 0 || y < 0 || x >= WN || y >= WN || hardTile(map.t[(y | 0) * WN + (x | 0)]);
+
+// 屋頂高度（1 m 格，存 0.1 m 為單位；0＝不是建築）：砲彈打到屋頂就在屋頂炸、直升機飛太低會撞樓
+const roofH = new Uint16Array(WN * WN);
+for (const b of map.buildings) {
+  const h = Math.min(65535, Math.round(b[4] * 10));
+  for (let y = Math.max(0, b[1]); y < Math.min(WN, b[3]); y++) roofH.fill(h, y * WN + Math.max(0, b[0]), y * WN + Math.min(WN, b[2]));
+}
+const roofAt = (x, y) => (x < 0 || y < 0 || x >= WN || y >= WN ? 0 : map.t[(y | 0) * WN + (x | 0)] === T.BUILDING ? roofH[(y | 0) * WN + (x | 0)] / 10 : 0);
+// 擋飛行單位的高度：建築＝屋頂、牆＝牆高
+const solidTop = (x, y) => { const v = x < 0 || y < 0 || x >= WN || y >= WN ? T.ROAD : map.t[(y | 0) * WN + (x | 0)]; return v === T.BUILDING ? roofH[(y | 0) * WN + (x | 0)] / 10 : v === T.WALL ? WALL_H : 0; };
+
+// 離最近障礙物的距離（倒角距離轉換，5＝1 格、7＝斜 1 格；上限 CLR_CAP＝20 m）：尋路挑夠寬的路、終點挑站得下的位置。
+// 蓋牆／牆被打穿時只重算變動範圍外擴 20 m（距離有上限，再遠的格子不受影響），不會整張 2048² 重算卡一下
+const CLR_CAP = 100;
+const clr = new Uint8Array(WN * WN);
+const hardPrev = new Uint8Array(WN * WN).fill(2);   // 上次算的時候哪些格是障礙（2＝還沒算過）
+const cellPt = new Float32Array(NN * NN * 2);   // 每個導航格裡最空曠的點（路徑點用這個，不用格中心，免得落在建築邊上）
+const cellClr = new Float32Array(NN * NN);      // 那個點的淨空（m）
+let clearanceMs = 0;
+function rebuildClearance() {
+  const t0 = performance.now(), t = map.t, N = WN;
+  let x0 = N, y0 = N, x1 = -1, y1 = -1;
+  for (let y = 0; y < N; y++) for (let x = 0, i = y * N; x < N; x++, i++) {
+    const h = hardTile(t[i]) ? 1 : 0;
+    if (h !== hardPrev[i]) { hardPrev[i] = h; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  if (x1 < 0) { clearanceMs = performance.now() - t0; return; }
+  const R = CLR_CAP / 5;
+  // 外圈（多 R）只當鄰居讀，內圈（變動範圍 ± R）的結果才寫回
+  const wx0 = Math.max(0, x0 - 2 * R), wy0 = Math.max(0, y0 - 2 * R), wx1 = Math.min(N - 1, x1 + 2 * R), wy1 = Math.min(N - 1, y1 + 2 * R);
+  const W = wx1 - wx0 + 1, Hh = wy1 - wy0 + 1, d = new Uint8Array(W * Hh);
+  for (let y = 0; y < Hh; y++) for (let x = 0; x < W; x++) d[y * W + x] = hardPrev[(wy0 + y) * N + wx0 + x] ? 0 : CLR_CAP;
+  for (let y = 0; y < Hh; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    let v = d[i];
+    if (!v) continue;
+    if (x > 0) v = Math.min(v, d[i - 1] + 5);
+    if (y > 0) { v = Math.min(v, d[i - W] + 5); if (x > 0) v = Math.min(v, d[i - W - 1] + 7); if (x < W - 1) v = Math.min(v, d[i - W + 1] + 7); }
+    d[i] = v;
+  }
+  for (let y = Hh - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
+    const i = y * W + x;
+    let v = d[i];
+    if (!v) continue;
+    if (x < W - 1) v = Math.min(v, d[i + 1] + 5);
+    if (y < Hh - 1) { v = Math.min(v, d[i + W] + 5); if (x < W - 1) v = Math.min(v, d[i + W + 1] + 7); if (x > 0) v = Math.min(v, d[i + W - 1] + 7); }
+    d[i] = v;
+  }
+  const ix0 = Math.max(0, x0 - R), iy0 = Math.max(0, y0 - R), ix1 = Math.min(N - 1, x1 + R), iy1 = Math.min(N - 1, y1 + R);
+  for (let y = iy0; y <= iy1; y++) for (let x = ix0; x <= ix1; x++) clr[y * N + x] = d[(y - wy0) * W + x - wx0];
+  for (let ny = Math.floor(iy0 / CELL); ny <= Math.floor(iy1 / CELL); ny++) for (let nx = Math.floor(ix0 / CELL); nx <= Math.floor(ix1 / CELL); nx++) {
+    let best = -1, bx = 0, by = 0;
+    for (let y = 0; y < CELL; y++) for (let x = 0; x < CELL; x++) {
+      const c = clr[(ny * CELL + y) * N + nx * CELL + x];
+      const sc = Math.min(c, 30) * 10 - Math.abs(x - 1.5) - Math.abs(y - 1.5);   // 一樣空曠就挑靠中間的
+      if (sc > best) { best = sc; bx = x; by = y; }
+    }
+    const j = ny * NN + nx;
+    cellPt[j * 2] = nx * CELL + bx + 0.5; cellPt[j * 2 + 1] = ny * CELL + by + 0.5;
+    cellClr[j] = clr[(ny * CELL + by) * N + nx * CELL + bx] / 5 - 0.5;
+  }
+  clearanceMs = performance.now() - t0;
+}
+// 點到最近障礙物邊緣的距離（m，約略）
+const clearAt = (x, y) => (x < 0 || y < 0 || x >= WN || y >= WN ? -1 : clr[(y | 0) * WN + (x | 0)] / 5 - 0.5);
+// 離 (x, y) 最近、站得下半徑 r 的點（螺旋往外找，最遠 maxR m）
+function nearestClear(x, y, r, maxR = 24) {
+  if (clearAt(x, y) >= r) return [x, y];
+  const cx = Math.floor(x), cy = Math.floor(y);
+  let best = null, bd = Infinity;
+  for (let d = 1; d <= maxR && !best; d++) for (let dy = -d; dy <= d; dy++) for (let dx = -d; dx <= d; dx++) {
+    if (Math.max(Math.abs(dx), Math.abs(dy)) !== d) continue;
+    const px = cx + dx + 0.5, py = cy + dy + 0.5;
+    if (clearAt(px, py) < r) continue;
+    const dd = (px - x) ** 2 + (py - y) ** 2;
+    if (dd < bd) { bd = dd; best = [px, py]; }
+  }
+  return best || [x, y];
+}
+
+// 圓（單位）推出障礙格：每次推出穿得最深的那一格，最多 4 次；中心整個陷進去（例如牆蓋在身上）就搬到最近站得下的點
+function pushOutTiles(u, r, solid) {
+  for (let it = 0; it < 4; it++) {
+    const x0 = Math.floor(u.x - r), x1 = Math.floor(u.x + r), y0 = Math.floor(u.y - r), y1 = Math.floor(u.y + r);
+    let pen = 0, nx = 0, ny = 0;
+    for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+      if (!solid(tx, ty)) continue;
+      const dx = u.x - clamp(u.x, tx, tx + 1), dy = u.y - clamp(u.y, ty, ty + 1), d = Math.hypot(dx, dy);
+      if (d >= r) continue;
+      if (d < 1e-6) {
+        const [px, py] = nearestClear(u.x, u.y, r * 0.5);
+        u.x = px; u.y = py; return true;
+      }
+      if (r - d > pen) { pen = r - d; nx = dx / d; ny = dy / d; }
+    }
+    if (pen <= 0) return it > 0;
+    u.x += nx * (pen + 1e-3); u.y += ny * (pen + 1e-3);
+  }
+  return true;
+}
+// 單位的碰撞半徑：卡住時會暫時縮小（擠過窄巷），順了再慢慢長回來
+const unitRadius = (u) => UR[u.type] * (u.squeeze || 1);
+function collideGround(u) { return pushOutTiles(u, unitRadius(u), (tx, ty) => hardAt(tx, ty)); }
+function collideAir(u) { return pushOutTiles(u, Math.min(unitRadius(u), 3.5), (tx, ty) => solidTop(tx, ty) > u.z - 1.5); }   // 機身（不含旋翼）撞樓
+
+// 單位 ↔ 單位：地面跟地面、空中跟空中（高度差 8 m 內）互推；地面部隊也繞開機槍堡。
+// 互推完再推出建築（建築說了算）；被擠到牆邊又會跟別人重疊，所以兩步交替做到沒有重疊為止（最多 6 輪）
+function separateUnits(list) {
+  for (let pass = 0; pass < 6; pass++) {
+    let worst = 0;
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i], ra = unitRadius(a), airA = isAir(a);
+      for (let j = i + 1; j < list.length; j++) {
+        const b = list[j];
+        if (airA !== isAir(b) || (airA && Math.abs(a.z - b.z) > 8)) continue;
+        let dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
+        const min = ra + unitRadius(b);
+        if (d >= min) continue;
+        if (d < 1e-4) { const ang = ((a.id * 7 + b.id * 13) % 16) * 0.3927; dx = Math.cos(ang); dy = Math.sin(ang); d = 0; } else { dx /= d; dy /= d; }
+        const pen = min - d + 1e-3, ma = UMASS[a.type], mb = UMASS[b.type];
+        worst = Math.max(worst, pen);
+        const ka = (pen * mb) / (ma + mb), kb = (pen * ma) / (ma + mb);
+        a.x -= dx * ka; a.y -= dy * ka; b.x += dx * kb; b.y += dy * kb;
+      }
+      if (!airA) for (const n of nests) {
+        const dx = a.x - n.x, dy = a.y - n.y, d = Math.hypot(dx, dy), min = ra + NEST_R;
+        if (d < min && d > 1e-4) { a.x += (dx / d) * (min - d); a.y += (dy / d) * (min - d); worst = Math.max(worst, min - d); }
+      }
+    }
+    for (const u of list) { if (isAir(u)) collideAir(u); else collideGround(u); u.x = clamp(u.x, 1, WN - 1); u.y = clamp(u.y, 1, WN - 1); }
+    if (worst < 0.01) break;
+  }
+}
+
+// 砲彈／子彈打建築：從 (x0, y0, z0) 直線到 (x1, y1, z1)，每 0.5 m 取樣，碰到比當下高度高的屋頂就停，
+// 再在前後兩點之間二分 8 次找到表面（牆面或屋頂，誤差 < 1 cm）。回傳 null（沒擋到）或 [x, y, z]（表面外側的撞點）
+function rayHitBuilding(x0, y0, z0, x1, y1, z1) {
+  const L = Math.hypot(x1 - x0, y1 - y0, z1 - z0), n = Math.max(1, Math.ceil(L / 0.5));
+  const at = (f) => [x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, z0 + (z1 - z0) * f];
+  const inside = (p) => roofAt(p[0], p[1]) > p[2];
+  if (inside(at(0))) return [x0, y0, Math.max(0, z0)];
+  for (let k = 1; k <= n; k++) {
+    if (!inside(at(k / n))) continue;
+    let a = (k - 1) / n, b = k / n;
+    for (let i = 0; i < 8; i++) { const m = (a + b) / 2; if (inside(at(m))) b = m; else a = m; }
+    const p = at(a);
+    p[2] = Math.max(0, p[2]);
+    return p;
+  }
+  return null;
+}
+// 地面直線視線（只算建築；牆 4 m，戰車與步兵從牆後面打得過去）
+const groundLos = (x0, y0, x1, y1) => !rayHitBuilding(x0, y0, 1.5, x1, y1, 1.5);
+
 // ---------- 戰鬥特效：粒子（槍口火光、火星、煙、血、塵）、燃燒殘骸 —— 全在 CPU、池子大小固定，跟喪屍數量無關 ----------
 // 每顆粒子 16 個 float：x y z vx vy vz 年齡 壽命 起始大小 結束大小 r g b a 重力 形狀
 // 形狀 0 火光（圓、自發光）、1 火星／血滴（方塊、隨時間變暗）、2 煙／塵（雜訊邊、越來越淡）
@@ -2107,29 +2307,37 @@ function updateParts(sdt) {
 function fxMuzzle(x, y, z, big) {
   emit(x, y, z, 0, 0, 0, big ? 0.09 : 0.05, big ? 2.6 : 0.75, big ? 1.4 : 0.35, 1, 0.92, 0.55, 1, 0, 0);
 }
-// 子彈打在屍群裡：多半噴血，偶爾揚塵
+// 子彈打中喪屍（GPU 回報的擊殺位置）：噴血
 function fxImpact(x, y) {
-  if (Math.random() < 0.7) {
-    for (let k = 0; k < 2; k++) emit(x, y, 1.1, rr(-2.5, 2.5), rr(-2.5, 2.5), rr(2, 5), rr(0.3, 0.45), 0.32, 0.22, 0.55, 0.04, 0.04, 1, 14, 1);
-  } else emit(x, y, 0.3, rr(-1, 1), rr(-1, 1), rr(0.5, 1.5), 0.5, 0.4, 1.3, 0.55, 0.5, 0.42, 0.55, 0, 2);
+  for (let k = 0; k < 2; k++) emit(x, y, 1.1, rr(-2.5, 2.5), rr(-2.5, 2.5), rr(2, 5), rr(0.3, 0.45), 0.32, 0.22, 0.55, 0.04, 0.04, 1, 14, 1);
 }
-// 爆炸（size＝爆炸圖寬度 m，13 戰車主砲 … 95 戰斧）：衝擊波圈、火球、四散火星、升起的煙
-function fxExplosion(x, y, size) {
-  const s = size / 20, rs = Math.sqrt(s);
-  game.marks.push({ type: 4, x, y, r: size * 0.75, life: 0.45, max: 0.45 });
-  emit(x, y, 1.5 * rs, 0, 0, 0, 0.14, size * 0.45, size * 0.7, 1, 0.9, 0.6, 1, 0, 0);
+// 沒打中：地上揚塵；打在牆／建築上（z 高）多幾顆火星
+function fxMiss(x, y, z = 0.3) {
+  emit(x, y, Math.max(0.3, z), rr(-1, 1), rr(-1, 1), rr(0.5, 1.5), 0.5, 0.4, 1.3, 0.55, 0.5, 0.42, 0.55, 0, 2);
+  if (z > 1) for (let k = 0; k < 2; k++) emit(x, y, z, rr(-3, 3), rr(-3, 3), rr(1, 4), rr(0.15, 0.3), 0.18, 0.1, 1, 0.8, 0.4, 1, 14, 1);
+}
+// 被爆炸炸死的喪屍：在牠倒下的位置噴一小團血
+function fxKillSplash(x, y) {
+  for (let k = 0; k < 3; k++) emit(x, y, 0.9, rr(-3.5, 3.5), rr(-3.5, 3.5), rr(2, 6), rr(0.3, 0.5), 0.35, 0.22, 0.5, 0.03, 0.03, 1, 14, 1);
+}
+// 爆炸（size＝爆炸圖寬度 m，r＝殺傷半徑，z＝爆心高度）：衝擊波圈（剛好畫在殺傷半徑上）、火球、四散火星、升起的煙
+function fxExplosion(x, y, size, r = size / FX_PER_R, z = 0) {
+  const s = size / 20, rs = Math.sqrt(s), ground = z < 0.5;
+  if (ground) game.marks.push({ type: 4, x, y, r, life: 0.45, max: 0.45 });
+  emit(x, y, z + 1.5 * rs, 0, 0, 0, 0.14, size * 0.45, size * 0.7, 1, 0.9, 0.6, 1, 0, 0);
   const nSp = clamp(Math.round(14 * s), 6, 48);
   for (let k = 0; k < nSp; k++) {
     const a = Math.random() * 6.2832, v = rr(6, 20) * rs;
-    emit(x, y, rr(0.5, 2) * rs, Math.cos(a) * v, Math.sin(a) * v, rr(5, 15) * rs, rr(0.45, 1.0), rr(0.3, 0.5) * rs, 0.2, 1, rr(0.65, 0.9), 0.3, 1, 22, 1);
+    emit(x, y, z + rr(0.5, 2) * rs, Math.cos(a) * v, Math.sin(a) * v, rr(5, 15) * rs, rr(0.45, 1.0), rr(0.3, 0.5) * rs, 0.2, 1, rr(0.65, 0.9), 0.3, 1, 22, 1);
   }
   const nSm = clamp(Math.round(6 * s), 3, 20);
   for (let k = 0; k < nSm; k++) {
     const a = Math.random() * 6.2832, d = rr(0, size * 0.22), g = rr(0.2, 0.3);
-    emit(x + Math.cos(a) * d, y + Math.sin(a) * d, rr(1, 3) * rs, Math.cos(a) * rr(1, 3), Math.sin(a) * rr(1, 3), rr(2.5, 5) * rs, rr(2.2, 4.2) * Math.min(rs, 2),
+    emit(x + Math.cos(a) * d, y + Math.sin(a) * d, z + rr(1, 3) * rs, Math.cos(a) * rr(1, 3), Math.sin(a) * rr(1, 3), rr(2.5, 5) * rs, rr(2.2, 4.2) * Math.min(rs, 2),
       size * 0.18, Math.min(size * 0.45, 26), g, g * 0.95, g * 0.9, 0.62, 0, 2);
   }
-  // 地面揚起的塵環
+  // 地面揚起的塵環（打在屋頂上就沒有）
+  if (!ground) return;
   const nD = clamp(Math.round(8 * rs), 6, 20);
   for (let k = 0; k < nD; k++) {
     const a = (k / nD) * 6.2832, v = rr(6, 10) * rs;
@@ -2198,6 +2406,71 @@ function pushParticles(push) {
   }
 }
 
+// ---------- 命中對齊：爆炸畫面跟模擬用同一個點、同一個半徑；GPU 回報的擊殺位置拿來畫曳光彈與血花 ----------
+// 爆炸圖寬 ÷ 殺傷半徑：圖上的火球約占圖寬 70%，所以火球半徑 ≈ 殺傷半徑 × 0.85；衝擊波圈＝殺傷半徑
+const FX_PER_R = 2.4;
+// 測試用：最近的爆炸（x, y, 殺傷半徑, 高度）、擊殺紀錄（x, y, 來源）、真的打死人的曳光彈終點
+const hitStats = { kills: 0, booms: [], log: [], shots: [], maxAge: 0.5 };   // maxAge：擊殺紀錄晚到超過幾秒（模擬時間）就不畫
+const keep = (arr, v, n = 256) => { arr.push(v); if (arr.length > n) arr.shift(); };
+// 所有爆炸（戰車主砲、砲兵、艦砲、空襲、戰斧、載具被毀、測試砲擊）都走這裡：殺傷、爆炸圖、粒子、焦痕同一個中心
+// z＞0＝打在屋頂上（爆炸畫在屋頂，地面不留焦痕）
+function detonate(x, y, r, lethal, z = 0, scorchLife = 90) {
+  sim.strikesOnce.push([x, y, r, lethal]);
+  keep(hitStats.booms, [x, y, r, z, sim.time], 64);
+  const size = r * FX_PER_R;
+  game.fx.push([x, y, size, sim.time, z]);
+  fxExplosion(x, y, size, r, z);
+  if (z < 0.5) game.marks.push({ type: 3, x, y, r: r * 0.75, life: scorchLife, max: scorchLife });
+  return size;
+}
+// 誰開的槍：殺傷區 1+2s＝部隊 s 的火力、2+2s＝輾壓；機槍堡 NEST.zone0+k；射擊線＝直接操控的單位
+function onKills(e, n) {
+  let splash = 0;
+  hitStats.kills += n;
+  for (let k = 0; k < n; k++) {
+    const x = e[k * 4], y = e[k * 4 + 1], src = e[k * 4 + 2] | 0, t = e[k * 4 + 3];
+    if (sim.time - t > hitStats.maxAge) continue;   // 讀回太晚（GPU 落後、切頁）就不畫了
+    keep(hitStats.log, [x, y, src, t], 512);
+    if (src >= 100 && src < 200) { if (splash++ < 48) fxKillSplash(x, y); continue; }   // 被炸死的：在屍體原位噴血
+    if (src >= 200) { if (control) shotAt(control, x, y); continue; }
+    if (src >= 1 && src <= USLOTS * 2) {
+      const u = slots[(src - 1) >> 1];
+      if (u && ((src - 1) & 1) === 0) shotAt(u, x, y); else fxImpact(x, y);
+      continue;
+    }
+    if (src >= NEST.zone0 && src < NEST.zone0 + NEST.max) { const ns = nests[src - NEST.zone0]; if (ns) nestShotAt(ns, x, y); continue; }
+    fxImpact(x, y);   // 近防、避難所民兵、前哨：只在打中的地方噴血
+  }
+}
+// 槍口位置：步兵班挑一個士兵、載具從車身、直升機從機身（畫面高度）
+function muzzleOf(u) {
+  if (u.type === 'squad') { const [sx, sy] = soldierPos(u, (Math.random() * u.men) | 0); return [sx + Math.cos(u.face) * 0.7, sy + Math.sin(u.face) * 0.7, 1.25]; }
+  return [u.x + Math.cos(u.face) * 2, u.y + Math.sin(u.face) * 2, isAir(u) ? visZ(u) : u.type === 'tank' ? 2.4 : 1.25];
+}
+// 一發真的打死喪屍的子彈：曳光彈從槍口畫到那隻喪屍倒下的位置，血花也在那裡
+function shotAt(u, x, y) {
+  const [mx, my, mz] = muzzleOf(u);
+  tracers.push([mx, my, mz, x, y, 0.8, 0.07, 0]);
+  keep(hitStats.shots, [x, y, u.id]);
+  fxMuzzle(mx, my, mz, false);
+  fxImpact(x, y, true);
+  u.lastHit = [x, y, sim.time];
+}
+function nestShotAt(ns, x, y) {
+  tracers.push([ns.x, ns.y, 1.2, x, y, 0.8, 0.07, 0]);
+  fxImpact(x, y, true);
+  ns.lastHit = [x, y, sim.time];
+}
+// 沒打死人的子彈（純畫面，讓槍聲連續）：瞄最近打中的地方附近；中間隔著建築就打在牆上
+function missShot(mx, my, mz, u, r, ground) {
+  const h = u.lastHit && sim.time - u.lastHit[2] < 1.5 ? u.lastHit : [u.aimX, u.aimY];
+  let hx = h[0] + (Math.random() - 0.5) * r * 2, hy = h[1] + (Math.random() - 0.5) * r * 2, hz = 0.8;
+  const hit = ground ? rayHitBuilding(mx, my, mz, hx, hy, hz) : null;
+  if (hit) [hx, hy, hz] = hit;
+  tracers.push([mx, my, mz, hx, hy, hz, 0.07, 0]);
+  fxMiss(hx, hy, hz);
+}
+
 // ---------- 部隊：步兵班、戰車、攻擊直升機 —— 尋路、交戰、被咬、選取、指令、TAB 直接操控 ----------
 const UT = {
   squad: { name: '步兵班', speed: 4.2, range: 42, rate: 1.6, contact: 4.0, bite: 3.2, ring: 7 },
@@ -2224,7 +2497,7 @@ function spawnUnit(type, x, y) {
   const t = UT[type];
   const u = { id: nextUnitId++, type, slot: s, x, y, z: type === 'heli' || type === 'transport' ? 40 : 0, tx: x, ty: y, tz: 40, path: [], vx: 0, vy: 0,
     face: Math.PI / 2, dir: 4, hp: t.hp || 0, men: type === 'squad' ? 8 : 0, dmg: 0, fireT: 0, firing: false, aimX: x, aimY: y + 10,
-    walk: 0, hang: 0, reach: 0, crowd: 0, flash: 0, danger: false, kills: 0, cargo: 0, supplyLoad: 0, mission: null, phase: null };
+    walk: 0, hang: 0, reach: 0, crowd: 0, flash: 0, danger: false, kills: 0, cargo: 0, supplyLoad: 0, mission: null, phase: null, squeeze: 1, stuck: 0, bestD: null };
   slots[s] = u; units.push(u);
   return u;
 }
@@ -2248,6 +2521,7 @@ function rebuildUnitBlock() {
     }
     unitBlock[ny * NN + nx] = hard >= 6 || wall > 0 ? 1 : 0;
   }
+  rebuildClearance();
 }
 rebuildUnitBlock();
 const nIdx = (x, y) => clamp(Math.floor(y / CELL), 0, NN - 1) * NN + clamp(Math.floor(x / CELL), 0, NN - 1);
@@ -2265,9 +2539,11 @@ function nearestOpen(i) {
 const gScore = new Float32Array(NN * NN), came = new Int32Array(NN * NN), closed = new Uint8Array(NN * NN);
 // 危險格（Nexus 封鎖的路段）：每格多算這麼多步，有別條路就繞，沒有才硬闖（10-nexus 的 rebuildDanger 填）
 const pathDanger = new Float32Array(NN * NN);
-function findPath(sx, sy, tx, ty) {
+// r＝單位半徑：太窄（淨空不夠）的格子當成走不過；這樣找不到路才退回不管寬度
+function findPath(sx, sy, tx, ty, r = 0) {
   const s = nearestOpen(nIdx(sx, sy)), t = nearestOpen(nIdx(tx, ty));
   if (s < 0 || t < 0) return null;
+  const narrow = r * 0.9;
   gScore.fill(Infinity); closed.fill(0);
   const tX = t % NN, tY = (t / NN) | 0;
   const h = (i) => { const dx = Math.abs((i % NN) - tX), dy = Math.abs(((i / NN) | 0) - tY); return Math.max(dx, dy) + 0.414 * Math.min(dx, dy); };
@@ -2288,21 +2564,23 @@ function findPath(sx, sy, tx, ty) {
       if (nx < 0 || ny < 0 || nx >= NN || ny >= NN) continue;
       const j = ny * NN + nx;
       if (unitBlock[j] || closed[j]) continue;
+      if (narrow > 0 && j !== t && cellClr[j] < narrow) continue;
       if (dx && dy && (unitBlock[y * NN + nx] || unitBlock[ny * NN + x])) continue;
       const g = gScore[i] + (dx && dy ? 1.414 : 1) + pathDanger[j];
       if (g < gScore[j]) { gScore[j] = g; came[j] = i; push(g + h(j), j); }
     }
   }
-  if (!found) return null;
+  if (!found) return r > 0 ? findPath(sx, sy, tx, ty, 0) : null;
   const cells = [];
   for (let i = t; i !== -1; i = came[i]) cells.push(i);
   cells.reverse();
-  // 拉直：從目前點往後找最遠看得到的格子
-  const pt = (i) => [((i % NN) + 0.5) * CELL, (((i / NN) | 0) + 0.5) * CELL];
+  // 拉直：從目前點往後找最遠看得到的格子（路徑點＝格子裡最空曠的點；直線上每一點都要站得下這個半徑）
+  const pt = (i) => [cellPt[i * 2], cellPt[i * 2 + 1]];
+  const need = Math.min(narrow, 2.5);
   const los = (a, b) => {
     const [ax, ay] = pt(a), [bx, by] = pt(b);
-    const n = Math.ceil(Math.hypot(bx - ax, by - ay) / 1.5);
-    for (let k = 1; k < n; k++) { const x = ax + ((bx - ax) * k) / n, y = ay + ((by - ay) * k) / n; if (blockedW(x, y) || pathDanger[nIdx(x, y)] > 0) return false; }
+    const n = Math.ceil(Math.hypot(bx - ax, by - ay) / 1);
+    for (let k = 1; k < n; k++) { const x = ax + ((bx - ax) * k) / n, y = ay + ((by - ay) * k) / n; if (blockedW(x, y) || clearAt(x, y) < need || pathDanger[nIdx(x, y)] > 0) return false; }
     return true;
   };
   const out = [];
@@ -2312,9 +2590,10 @@ function findPath(sx, sy, tx, ty) {
     while (j > k + 1 && !los(cells[k], cells[j])) j--;
     out.push(pt(cells[j])); k = j;
   }
-  if (out.length) out[out.length - 1] = [tx, ty];
+  if (out.length) out[out.length - 1] = r > 0 ? nearestClear(tx, ty, r) : [tx, ty];   // 終點在建築邊上就挪到站得下的地方
   return out;
 }
+const pathFor = (u, x, y) => findPath(u.x, u.y, x, y, UR[u.type]);
 
 // ----- 指令 -----
 function orderMove(x, y, ids = [...sel]) {
@@ -2324,7 +2603,8 @@ function orderMove(x, y, ids = [...sel]) {
     const ox = ((k % cols) - (cols - 1) / 2) * 12, oy = (Math.floor(k / cols) - (Math.ceil(list.length / cols) - 1) / 2) * 12;
     const gx = clamp(x + ox, 2, WN - 2), gy = clamp(y + oy, 2, WN - 2);
     u.tx = gx; u.ty = gy;
-    u.path = isAir(u) ? [] : findPath(u.x, u.y, gx, gy) || [];
+    u.path = isAir(u) ? [] : pathFor(u, gx, gy) || [];
+    u.stuck = 0;
   });
   return list.length;
 }
@@ -2353,19 +2633,19 @@ function spawnZombieAt(x, y) {
   device.queue.writeBuffer(infoB, sim.n * 8, new Uint32Array([1 | (((Math.random() * 256) | 0) << 8), 0]));
   sim.n++;
 }
-function explodeAt(x, y, r, lethal, fxSize) {
-  sim.strikesOnce.push([x, y, r, lethal]);
-  game.fx.push([x, y, fxSize, sim.time]);
-  fxExplosion(x, y, fxSize);
-  game.marks.push({ type: 3, x, y, r: r * 0.8, life: 60, max: 60 });
-}
+const explodeAt = (x, y, r, lethal, z = 0) => detonate(x, y, r, lethal, z, 60);
 // 畫面上的高度：直升機實際高度壓縮顯示（40 m 畫成 16 m），不然戰術視角下會飛出畫面；物理照用實際高度
 const visZ = (u) => (isAir(u) ? 4 + u.z * 0.3 : 1);
 const angTo8 = (th) => ((Math.round((-90 - (th * 180) / Math.PI) / 45) % 8) + 8) % 8;
 const angTo4 = (th) => { const c = Math.cos(th), s = Math.sin(th); return Math.abs(c) > Math.abs(s) ? (c > 0 ? 2 : 1) : (s > 0 ? 3 : 0); };
 
 // ----- 每幀更新（sdt＝模擬秒） -----
+const unitPerf = { ms: 0, max: 0 };
 function updateUnits(sdt) {
+  const tU = performance.now();
+  try { updateUnitsInner(sdt); } finally { const ms = performance.now() - tU; unitPerf.ms = lerp(unitPerf.ms, ms, 0.05); unitPerf.max = Math.max(unitPerf.max, ms); }
+}
+function updateUnitsInner(sdt) {
   const P = sim.probe;
   for (const u of [...units]) {
     const t = UT[u.type], b = u.slot * 8;
@@ -2387,7 +2667,10 @@ function updateUnits(sdt) {
       const drag = 1 / (1 + u.hang * 0.6);
       mvx = u.vx * drag; mvy = u.vy * drag;
       u.x = clamp(u.x + mvx * sdt, 1, WN - 1); u.y = clamp(u.y + mvy * sdt, 1, WN - 1);
-      const vz = (u.tz > u.z ? Math.min(5, (u.tz - u.z) * 1.5) : Math.max(-4, (u.tz - u.z) * 1.5)) - 0.9 * u.hang;
+      // 前面或底下有比較高的樓：先爬升越過去（設定的高度不變，過了樓再降回來）
+      const zGoal = Math.max(u.tz, airClearance(u, dx, dy, d));
+      u.climbing = zGoal > u.tz + 0.5;
+      const vz = (zGoal > u.z ? Math.min(u.climbing ? 9 : 5, (zGoal - u.z) * 1.5) : Math.max(-4, (zGoal - u.z) * 1.5)) - 0.9 * u.hang;
       u.z = Math.max(u.landed ? 2.5 : 0, u.z + vz * sdt);
     } else {
       if (ctl) {
@@ -2397,13 +2680,17 @@ function updateUnits(sdt) {
       } else if (u.path.length) {
         const [wx, wy] = u.path[0];
         const dx = wx - u.x, dy = wy - u.y, d = Math.hypot(dx, dy);
-        if (d < (u.type === 'tank' || u.type === 'truck' ? 3 : 1.5)) u.path.shift();
+        if (d < (u.type === 'tank' || u.type === 'truck' ? 3 : 1.5)) { u.path.shift(); u.bestD = null; }
         else { mvx = (dx / d) * t.speed; mvy = (dy / d) * t.speed; }
+        followCheck(u, d, sdt);
       }
-      const nx = u.x + mvx * sdt, ny = u.y + mvy * sdt;
-      if (!blockedW(nx, ny)) { u.x = nx; u.y = ny; }
-      else if (!blockedW(nx, u.y)) u.x = nx;
-      else if (!blockedW(u.x, ny)) u.y = ny;
+      // 每步最多 0.5 m，邊走邊推出建築／牆／水（4 倍速也不會穿過 2 m 厚的牆）
+      const ox = u.x, oy = u.y, stepN = Math.max(1, Math.ceil((Math.hypot(mvx, mvy) * sdt) / 0.5));
+      for (let k = 0; k < stepN; k++) { u.x += (mvx * sdt) / stepN; u.y += (mvy * sdt) / stepN; collideGround(u); }
+      u.x = clamp(u.x, 1, WN - 1); u.y = clamp(u.y, 1, WN - 1);
+      if (sdt > 0) { const ax = (u.x - ox) / sdt, ay = (u.y - oy) / sdt; if (Math.hypot(ax, ay) < Math.hypot(mvx, mvy) * 0.25) { mvx = ax; mvy = ay; } }   // 頂著牆：原地不算在走
+      // 卡住時縮小的半徑：周圍夠空就慢慢長回來
+      if (u.squeeze < 1) u.squeeze = Math.min(1, u.squeeze + sdt * 0.25, Math.max(u.squeeze, (clearAt(u.x, u.y) - 0.2) / UR[u.type]));
     }
     const sp = Math.hypot(mvx, mvy);
     u.moving = sp > 0.3;
@@ -2418,13 +2705,15 @@ function updateUnits(sdt) {
     if (u.firing && u.type !== 'transport') u.face = Math.atan2(u.aimY - u.y, u.aimX - u.x);
     else if (sp > 0.3) u.face = Math.atan2(mvy, mvx);
     u.dir = angTo8(u.face);
-    // 戰車主砲：AI 對著屍群重心、操控時對著準星（點住才開）
-    if (u.type === 'tank' && u.fireT <= 0 && supply.stock >= 4 && ((ctl && aim.firing) || (!ctl && inr > 25))) {
+    // 戰車主砲：AI 瞄最密的那團（看得到才開）、操控時對著準星（點住才開）。砲彈走直線，路上撞到建築就在牆面炸
+    const shot = u.type === 'tank' && u.fireT <= 0 && supply.stock >= 4 && ((ctl && aim.firing) || (!ctl && inr > 25)) ? tankTarget(u, ctl, P[b + 5]) : null;
+    if (shot) {
       useSupply(4);
-      const sx = ctl ? 0 : (Math.random() - 0.5) * 8, sy = ctl ? 0 : (Math.random() - 0.5) * 8;
-      const ex = u.aimX + sx, ey = u.aimY + sy;
-      explodeAt(ex, ey, 6, 0.9, 13);
-      tracers.push([u.x + Math.cos(u.face) * 5, u.y + Math.sin(u.face) * 5, 2.2, ex, ey, 0.5, 0.08, 1]);
+      u.face = Math.atan2(shot[1] - u.y, shot[0] - u.x); u.dir = angTo8(u.face);
+      const hit = rayHitBuilding(u.x + Math.cos(u.face) * 5, u.y + Math.sin(u.face) * 5, 2.2, shot[0], shot[1], 0.5);
+      const [ex, ey, ez] = hit || [shot[0], shot[1], 0];
+      explodeAt(ex, ey, 6, 0.9, ez > 1 ? ez : 0);
+      tracers.push([u.x + Math.cos(u.face) * 5, u.y + Math.sin(u.face) * 5, 2.2, ex, ey, Math.max(0.5, ez), 0.08, 1]);
       game.fx.push([u.x + Math.cos(u.face) * 5.5, u.y + Math.sin(u.face) * 5.5, 4, sim.time]);
       // 砲口爆風：一團亮光＋往前噴的煙，車身底下揚塵
       const mx = u.x + Math.cos(u.face) * 6, my = u.y + Math.sin(u.face) * 6;
@@ -2433,35 +2722,26 @@ function updateUnits(sdt) {
       for (let k = 0; k < 6; k++) { const a = Math.random() * 6.2832; emit(u.x + Math.cos(a) * 3, u.y + Math.sin(a) * 3, 0.3, Math.cos(a) * 5, Math.sin(a) * 5, 0.3, 0.7, 1, 2.6, 0.55, 0.5, 0.42, 0.45, 0, 2); }
       u.fireT = ctl ? 2.5 : t.reload;
     }
-    // 曳光彈（純畫面）
-    if (u.firing && sdt > 0) {
-      const shooters = u.type === 'squad' ? u.men : u.type === 'tank' ? 1 : 2;
-      const n = Math.random() < shooters * sdt * 6 ? 1 : 0;
-      for (let k = 0; k < n; k++) {
-        const r = u.type === 'squad' ? 3 : 1.5, z0 = isAir(u) ? visZ(u) : u.type === 'tank' ? 2.4 : 1.25;
-        // 步兵：從隨便一個士兵的槍口射出；其他：從車身／機身
-        const [ox, oy] = u.type === 'squad' ? soldierOffset(u, (Math.random() * u.men) | 0) : [0, 0];
-        const mx = u.x + ox + Math.cos(u.face) * (u.type === 'squad' ? 0.7 : 2), my = u.y + oy + Math.sin(u.face) * (u.type === 'squad' ? 0.7 : 2);
-        const hx = u.aimX + (Math.random() - 0.5) * r * 2, hy = u.aimY + (Math.random() - 0.5) * r * 2;
-        tracers.push([mx, my, z0, hx, hy, 0.8, 0.07, 0]);
-        fxMuzzle(mx, my, z0, false);
-        fxImpact(hx, hy);
-      }
+    // 曳光彈：打死喪屍的那幾發由 GPU 擊殺紀錄畫（onKills → shotAt，畫到牠倒下的位置）；這裡補沒打中的幾發（只揚塵、不噴血）
+    if (u.firing && sdt > 0 && Math.random() < (u.type === 'squad' ? u.men : u.type === 'tank' ? 1 : 2) * sdt * 3) {
+      const [mx, my, mz] = muzzleOf(u);
+      fxMuzzle(mx, my, mz, false);
+      missShot(mx, my, mz, u, u.type === 'squad' ? 3 : 1.5, !isAir(u));
     }
     // --- 被咬 / 被抓 ---
     if (u.type === 'squad') {
       u.dmg += contact * t.bite * sdt;
       while (u.dmg >= 100 && u.men > 0) {
         u.dmg -= 100; u.men--;
-        const off = soldierOffset(u, u.men);
-        fxSoldierDown(u.x + off[0], u.y + off[1]); u.hurt = 0.25;
-        if (Math.random() < 0.7) spawnZombieAt(u.x + off[0], u.y + off[1]);   // 被咬的變成喪屍
+        const [sx, sy] = soldierPos(u, u.men);
+        fxSoldierDown(sx, sy); u.hurt = 0.25;
+        if (Math.random() < 0.7) spawnZombieAt(sx, sy);   // 被咬的變成喪屍
         game.lost = (game.lost || 0) + 1;
       }
       if (u.men <= 0) { removeUnit(u); continue; }
     } else if (u.type === 'tank' || u.type === 'truck') {
       u.hp -= contact * t.bite * sdt;
-      if (u.hp <= 0) { explodeAt(u.x, u.y, 9, 0.95, 22); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
+      if (u.hp <= 0) { explodeAt(u.x, u.y, 9, 0.95); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
     } else {
       u.reach = maxPile + 2.7; u.crowd = contact;
       u.danger = u.z < u.reach + 3 && contact > 6;
@@ -2471,10 +2751,46 @@ function updateUnits(sdt) {
       } else if (u.hang > 0 && u.z > u.reach + 1.5 && Math.random() < 1.2 * sdt) u.hang--;
       u.hp -= u.hang * 2.5 * sdt;
       if (u.flash > 0) u.flash -= sdt;
-      if ((u.z <= 0.5 && !u.landed) || u.hp <= 0) { explodeAt(u.x, u.y, 11, 0.95, 26); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
+      if ((u.z <= 0.5 && !u.landed) || u.hp <= 0) { explodeAt(u.x, u.y, 11, 0.95); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
     }
   }
+  separateUnits(units);
   for (let k = tracers.length - 1; k >= 0; k--) if ((tracers[k][6] -= sdt) <= 0) tracers.splice(k, 1);
+}
+// 走路徑時 1.2 秒沒更靠近路徑點＝卡住：終點被別的單位佔著就停在旁邊；不然半徑縮小（擠得過窄巷）、重新找路
+function followCheck(u, d, sdt) {
+  if (u.bestD == null || d < u.bestD - 0.3) { u.bestD = d; u.stuck = 0; return; }
+  u.stuck = (u.stuck || 0) + sdt;
+  if (u.stuck < 1.2) return;
+  u.stuck = 0; u.bestD = null;
+  if (u.path.length === 1 && d < UR[u.type] * 3 + 4) { u.path = []; return; }
+  u.squeeze = Math.max(0.35, (u.squeeze || 1) * 0.7);
+  const p = findPath(u.x, u.y, u.tx, u.ty, unitRadius(u));
+  if (p) u.path = p;
+}
+// 直升機要飛多高才不會撞樓：機身底下 4 m 內、往目標方向 30 m 內最高的屋頂／牆 + 4 m
+function airClearance(u, dx, dy, d) {
+  let top = 0;
+  for (let oy = -3; oy <= 3; oy += 3) for (let ox = -3; ox <= 3; ox += 3) top = Math.max(top, solidTop(u.x + ox, u.y + oy));
+  if (d > 1) { const L = Math.min(d, 30); for (let s = 2; s <= L; s += 2) top = Math.max(top, solidTop(u.x + (dx / d) * s, u.y + (dy / d) * s)); }
+  return top > 0 ? top + 4 : 0;
+}
+// 第 k 個士兵的世界座標：貼著建築／牆時隊形往中間收，士兵不會站進牆裡
+// 戰車主砲瞄哪：AI＝探測回報 8–48 m 內最密的 3×3 m（中間隔著建築就改瞄重心，重心也看不到就不開）；操控＝準星
+function tankTarget(u, ctl, best) {
+  if (ctl) return [aim.x, aim.y];
+  const n = best >>> 22, idx = best & 0x3fffff;
+  const cands = [];
+  if (n >= 3) cands.push([(idx % WN) + 0.5 + (Math.random() - 0.5) * 1.5, Math.floor(idx / WN) + 0.5 + (Math.random() - 0.5) * 1.5]);
+  cands.push([u.aimX, u.aimY]);
+  for (const [x, y] of cands) if (Math.hypot(x - u.x, y - u.y) < UT.tank.range && groundLos(u.x, u.y, x, y)) return [x, y];
+  return null;
+}
+function soldierPos(u, k) {
+  const [ox, oy] = soldierOffset(u, k);
+  let x = u.x + ox, y = u.y + oy;
+  if (hardAt(x, y) || clearAt(x, y) < 0.3) { x = u.x + ox * 0.35; y = u.y + oy * 0.35; }
+  return [x, y];
 }
 function soldierOffset(u, k) {
   const r = k >> 2, c = k & 3;
@@ -2502,8 +2818,9 @@ function unitZones() {
     let a = [0, 0, 0, 0], b = [0, 0, 0, 0];
     if (u && control !== u) {
       const t = UT[u.type];
-      if (u.type === 'squad' && u.firing) a = [u.x, u.y, t.range, rate(t.rate * u.men, zc[i])];
-      if (u.type === 'tank' && u.firing) a = [u.x, u.y, t.range, rate(t.rate, zc[i])];
+      // 地面射手：半徑給負的＝GPU 只算看得到的（中間沒有建築）
+      if (u.type === 'squad' && u.firing) a = [u.x, u.y, -t.range, rate(t.rate * u.men, zc[i])];
+      if (u.type === 'tank' && u.firing) a = [u.x, u.y, -t.range, rate(t.rate, zc[i])];
       if (isAir(u) && supply.stock > 0 && (u.type === 'heli' || u.firing)) { const r = clamp(8 + u.z * 0.5, 8, t.range), acc = clamp(1.25 - u.z / 50, 0.45, 1.15); a = [u.x, u.y, r, rate(t.rate * acc, zc[i])]; }
     }
     if (u && u.type === 'tank' && u.moving) b = [u.x, u.y, 3.2, 8];   // 輾過去
@@ -2515,7 +2832,9 @@ function unitZones() {
 function unitLines() {
   const u = control;
   if (!u || !aim.firing || u.type === 'tank' || u.type === 'truck' || supply.stock <= 0) return [];
-  const dx = aim.x - u.x, dy = aim.y - u.y, d = Math.hypot(dx, dy) || 1, L = Math.min(d, isAir(u) ? 45 : 60);
+  const dx = aim.x - u.x, dy = aim.y - u.y, d = Math.hypot(dx, dy) || 1;
+  let L = Math.min(d, isAir(u) ? 45 : 60);
+  if (!isAir(u)) { const hit = rayHitBuilding(u.x, u.y, 1.5, u.x + (dx / d) * L, u.y + (dy / d) * L, 1.5); if (hit) L = Math.hypot(hit[0] - u.x, hit[1] - u.y); }   // 射擊線停在第一棟建築
   const kps = u.type === 'squad' ? u.men * 2.6 : 22;
   return [[u.x, u.y, u.x + (dx / d) * L, u.y + (dy / d) * L, isAir(u) ? 2.5 : 1.6, Math.min(6, kps / Math.max(sim.lineCounts[0], 1)), 0, 0]];
 }
@@ -2550,11 +2869,11 @@ function pushUnitInstances(push) {
       const w = (1.85 * sl.cw) / sl.ch;
       const row4 = angTo4(u.face);
       for (let k = 0; k < u.men; k++) {
-        const [ox, oy] = soldierOffset(u, k);
+        const [px, py] = soldierPos(u, k);
         let row = row4, col = 0, flip = 0;
         if (u.firing && ((Math.floor(sim.time * 12) + k) & 1)) { row = 2; col = 4; flip = Math.cos(u.face) < 0 ? 1 : 0; }
         else if (u.moving) col = (Math.floor(u.walk * 1.6) + k) & 3;
-        push([u.x + ox, u.y + oy, 0, w], [1.85, sl.x + col * sl.cw, sl.y + row * sl.ch, 5], [sl.cw, sl.ch, 1, flip | (u.hurt > 0 ? 8 : 0)]);
+        push([px, py, 0, w], [1.85, sl.x + col * sl.cw, sl.y + row * sl.ch, 5], [sl.cw, sl.ch, 1, flip | (u.hurt > 0 ? 8 : 0)]);
       }
     }
   }
@@ -2617,10 +2936,10 @@ function projectPx(x, y, z, r) {
 
 // ---------- 火力支援：砲兵、艦砲、空襲、戰斧飛彈（會誤傷自己人） ----------
 const SUP = {
-  artillery: { name: '砲兵', delay: 3, cd: 18, rounds: 6, spread: 20, r: 11, lethal: 0.9, every: 0.3, fx: 22 },
-  naval: { name: '艦砲', delay: 5, cd: 28, rounds: 12, spread: 26, r: 11, lethal: 0.92, every: 0.4, fx: 20 },
-  air: { name: '空襲', delay: 6, cd: 45, rounds: 8, len: 220, r: 13, lethal: 0.93, fx: 26 },
-  tomahawk: { name: '戰斧', delay: 12, cd: 90, r: 42, lethal: 0.97, fx: 95 },
+  artillery: { name: '砲兵', delay: 3, cd: 18, rounds: 6, spread: 20, r: 11, lethal: 0.9, every: 0.3 },
+  naval: { name: '艦砲', delay: 5, cd: 28, rounds: 12, spread: 26, r: 11, lethal: 0.92, every: 0.4 },
+  air: { name: '空襲', delay: 6, cd: 45, rounds: 8, len: 220, r: 13, lethal: 0.93 },
+  tomahawk: { name: '戰斧', delay: 12, cd: 90, r: 42, lethal: 0.97 },
 };
 const SUP_KEYS = { KeyZ: 'artillery', KeyX: 'naval', KeyC: 'air', KeyV: 'tomahawk' };
 // 外海艦隊（純畫面＋艦砲/飛彈的發射點）
@@ -2644,12 +2963,9 @@ function callSupport(type, x, y, x2, y2) {
   support.missions.push(m);
   return true;
 }
-// 爆炸：殺喪屍＋特效＋焦痕＋震動＋誤傷
-function boom(x, y, r, lethal, fx, shake) {
-  sim.strikesOnce.push([x, y, r, lethal]);
-  game.fx.push([x, y, fx, sim.time]);
-  fxExplosion(x, y, fx);
-  game.marks.push({ type: 3, x, y, r: r * 0.75, life: 90, max: 90 });
+// 爆炸：殺喪屍＋特效＋焦痕＋震動＋誤傷（殺傷跟畫面同一個點，見 detonate）
+function boom(x, y, r, lethal, shake, z = 0) {
+  detonate(x, y, r, lethal, z);
   support.shake = Math.max(support.shake, shake);
   for (const u of [...units]) {
     const d = Math.hypot(u.x - x, u.y - y);
@@ -2657,13 +2973,17 @@ function boom(x, y, r, lethal, fx, shake) {
     if (u.type === 'squad') {
       let lost = 0;
       for (let k = 0; k < u.men; k++) {
-        const [ox, oy] = soldierOffset(u, k), dd = Math.hypot(u.x + ox - x, u.y + oy - y);
-        if (dd < r && Math.random() < lethal * (1 - dd / r)) { lost++; fxSoldierDown(u.x + ox, u.y + oy); }
+        const [sx, sy] = soldierPos(u, k), dd = Math.hypot(sx - x, sy - y);
+        if (dd < r && Math.random() < lethal * (1 - dd / r)) { lost++; fxSoldierDown(sx, sy); }
       }
       if (lost) { u.men -= lost; game.lost += lost; game.friendly = (game.friendly || 0) + lost; if (u.men <= 0) removeUnit(u); }
     } else if (u.type === 'tank' && d < r) { u.hp -= 900 * (1 - d / r); game.friendly = (game.friendly || 0) + 1; }
     else if (u.type === 'heli' && d < r && u.z < 12) { u.hp -= 80 * (1 - d / r); }
   }
+}
+// 砲彈在第 s（0..1）段飛行時的位置：直線，艦砲（低平彈道）再加一點拋物線。畫面跟撞樓判定共用
+function shellAt(sh, s) {
+  return [lerp(sh.from[0], sh.tx, s), lerp(sh.from[1], sh.ty, s), lerp(sh.from[2], 0, s) + (sh.from[2] < 20 ? 60 * s * (1 - s) : 0)];
 }
 const gauss2 = () => { const a = Math.random() * 6.2831853, r = Math.sqrt(-2 * Math.log(Math.random() + 1e-9)) * 0.5; return [Math.cos(a) * r, Math.sin(a) * r]; };
 
@@ -2680,7 +3000,7 @@ function updateSupport(sdt) {
         const [gx, gy] = gauss2();
         const tx = m.x + gx * s.spread, ty = m.y + gy * s.spread;
         const from = m.type === 'naval' ? [FLEET.destroyer[0] + 24, FLEET.destroyer[1], 6] : [tx - 40, ty - 60, 140];
-        support.shells.push({ tx, ty, from, t: 0, dur: m.type === 'naval' ? 0.9 : 0.5, r: s.r, lethal: s.lethal, fx: s.fx });
+        support.shells.push({ tx, ty, from, t: 0, dur: m.type === 'naval' ? 0.9 : 0.5, r: s.r, lethal: s.lethal });
         if (m.type === 'naval') game.fx.push([FLEET.destroyer[0] + 26, FLEET.destroyer[1] + 1, 7, sim.time]);
         m.fired++; m.next += s.every;
       }
@@ -2701,10 +3021,14 @@ function updateSupport(sdt) {
     }
   }
   support.missions = support.missions.filter((m) => !m.done);
-  // 砲彈飛行
+  // 砲彈飛行：這一幀飛過的那段如果穿進建築（低於屋頂），就在撞點炸；沒撞到就落在目標點
   for (const sh of support.shells) {
+    const a = shellAt(sh, Math.min(1, sh.t / sh.dur));
     sh.t += sdt;
-    if (sh.t >= sh.dur && !sh.hit) { sh.hit = true; boom(sh.tx, sh.ty, sh.r, sh.lethal, sh.fx, 0.25); }
+    const b = shellAt(sh, Math.min(1, sh.t / sh.dur));
+    const hit = rayHitBuilding(a[0], a[1], a[2], b[0], b[1], b[2]);
+    if (hit) { sh.hit = true; boom(hit[0], hit[1], sh.r, sh.lethal, 0.25, hit[2]); }
+    else if (sh.t >= sh.dur && !sh.hit) { sh.hit = true; boom(sh.tx, sh.ty, sh.r, sh.lethal, 0.25); }
   }
   support.shells = support.shells.filter((sh) => !sh.hit);
   // 噴射機
@@ -2713,7 +3037,7 @@ function updateSupport(sdt) {
     const s = SUP.air, along = (j.x - j.m.x0) * j.dx + (j.y - j.m.y0) * j.dy;
     while (j.dropped < s.rounds && along >= (j.dropped / (s.rounds - 1)) * s.len) {
       const bx = j.m.x0 + j.dx * (j.dropped / (s.rounds - 1)) * s.len, by = j.m.y0 + j.dy * (j.dropped / (s.rounds - 1)) * s.len;
-      support.shells.push({ tx: bx, ty: by, from: [bx - j.dx * 40, by - j.dy * 40, 30], t: 0, dur: 0.45, r: s.r, lethal: s.lethal, fx: s.fx });
+      support.shells.push({ tx: bx, ty: by, from: [bx - j.dx * 40, by - j.dy * 40, 30], t: 0, dur: 0.45, r: s.r, lethal: s.lethal });
       j.dropped++;
     }
     if (along > s.len + 450) j.gone = true;
@@ -2722,10 +3046,13 @@ function updateSupport(sdt) {
   // 戰斧：從航艦起飛、拉高、俯衝；尾煙
   for (const ms of support.missiles) {
     ms.t += sdt;
-    const p = Math.min(1, ms.t / ms.dur);
-    ms.x = lerp(ms.sx, ms.tx, p); ms.y = lerp(ms.sy, ms.ty, p); ms.z = 10 + 260 * p * (1 - p);
+    const p = Math.min(1, ms.t / ms.dur), s = SUP.tomahawk;
+    const px = ms.x ?? ms.sx, py = ms.y ?? ms.sy, pz = ms.z ?? 10;
+    ms.x = lerp(ms.sx, ms.tx, p); ms.y = lerp(ms.sy, ms.ty, p); ms.z = 10 * (1 - p) + 260 * p * (1 - p);   // 最後俯衝到地面
     if (Math.random() < 0.9) support.trail.push([ms.x, ms.y, ms.z, 1.2]);
-    if (p >= 1 && !ms.hit) { ms.hit = true; const s = SUP.tomahawk; boom(ms.tx, ms.ty, s.r, s.lethal, s.fx, 1.0); }
+    const hit = !ms.hit && rayHitBuilding(px, py, pz, ms.x, ms.y, ms.z);
+    if (hit) { ms.hit = true; boom(hit[0], hit[1], s.r, s.lethal, 1.0, hit[2]); }
+    else if (p >= 1 && !ms.hit) { ms.hit = true; boom(ms.tx, ms.ty, s.r, s.lethal, 1.0); }
   }
   support.missiles = support.missiles.filter((ms) => !ms.hit);
   for (const tp of support.trail) tp[3] -= sdt;
@@ -2742,8 +3069,7 @@ function pushSupportInstances(push) {
   }
   for (const sh of support.shells) {
     const p = Math.min(1, sh.t / sh.dur), q = Math.max(0, p - 0.12);
-    const at = (s) => [lerp(sh.from[0], sh.tx, s), lerp(sh.from[1], sh.ty, s), lerp(sh.from[2], 0, s) + (sh.from[2] < 20 ? 60 * s * (1 - s) : 0)];
-    const a = at(q), b = at(p);
+    const a = shellAt(sh, q), b = shellAt(sh, p);
     push([a[0], a[1], a[2], 2], [b[0], b[1], b[2], 4], [1, 0.85, 0.55, 0.95]);
   }
   for (const tp of support.trail) push([tp[0], tp[1], tp[2], 3], [tp[0] + 1.5, tp[1] + 1.5, tp[2] + 0.5, 4], [0.75, 0.75, 0.75, 0.5 * tp[3]]);
@@ -3212,7 +3538,7 @@ function orderAt(x, y) {
 function routeTo(u, x, y) {
   u.tx = x; u.ty = y;
   if (isAir(u)) { u.tz = 40; u.landed = false; u.path = []; return true; }
-  const p = findPath(u.x, u.y, x, y);
+  const p = pathFor(u, x, y);
   if (!p) { logEvent(`${UT[u.type].name} 無法到達目的地，任務取消`, 'bad'); u.mission = null; u.phase = null; u.path = []; return false; }
   u.path = p;
   return true;
@@ -3311,11 +3637,11 @@ function updateNests(sdt) {
     if (n.firing) {
       n.aimX = n.x + cx; n.aimY = n.y + cy; n.face = Math.atan2(cy, cx);
       useSupply(NEST.use * sdt);
-      if (Math.random() < sdt * 9) tracers.push([n.x, n.y, 1.2, n.aimX + (Math.random() - 0.5) * 4, n.aimY + (Math.random() - 0.5) * 4, 0.6, 0.07, 0]);
+      if (Math.random() < sdt * 5) missShot(n.x, n.y, 1.2, n, 2, true);   // 打死的那幾發由擊殺紀錄畫（nestShotAt）
     }
     n.hp -= contact * NEST.bite * sdt;
     if (n.hp <= 0) {
-      explodeAt(n.x, n.y, 5, 0.6, 12);
+      explodeAt(n.x, n.y, 5, 0.6);
       logEvent(`機槍堡 ${n.id} 被屍潮淹沒`, 'bad');
       game.lost++;
       nests.splice(k, 1);
@@ -3325,7 +3651,7 @@ function updateNests(sdt) {
 function nestZones(z) {
   for (let k = 0; k < NEST.max; k++) {
     const n = nests[k], i = NEST.zone0 + k;
-    z[i] = n && n.firing ? [n.x, n.y, NEST.r, Math.min(4, NEST.rate / Math.max(sim.zoneCounts[i], 1))] : [0, 0, 0, 0];
+    z[i] = n && n.firing ? [n.x, n.y, -NEST.r, Math.min(4, NEST.rate / Math.max(sim.zoneCounts[i], 1))] : [0, 0, 0, 0];
   }
 }
 function nestTargets() { return nests.filter((n) => n.firing).map((n) => [n.x, n.y, 5, 60]); }
@@ -3551,7 +3877,7 @@ function rerouteAround(b) {
   let n = 0;
   for (const u of units) {
     if (isAir(u) || !u.path.length || !pathHits(u, b)) continue;
-    const p = findPath(u.x, u.y, u.tx, u.ty);
+    const p = pathFor(u, u.tx, u.ty);
     if (p) { u.path = p; if (!pathHits(u, b)) n++; }
   }
   return n;
@@ -3823,7 +4149,7 @@ async function applySave(slot) {
     const u = spawnUnit(d.type, d.x, d.y);
     if (!u) continue;
     Object.assign(u, d, { slot: u.slot, path: [] });
-    if (!isAir(u) && Math.hypot(u.tx - u.x, u.ty - u.y) > 3) u.path = findPath(u.x, u.y, u.tx, u.ty) || [];
+    if (!isAir(u) && Math.hypot(u.tx - u.x, u.ty - u.y) > 3) u.path = pathFor(u, u.tx, u.ty) || [];
   }
   nextUnitId = s.nextUnitId;
   s.districts.forEach((d, k) => Object.assign(districts[k], d));
@@ -3859,11 +4185,12 @@ const spawnMs = performance.now() - tSpawn;
 
 const fob = map.fob;
 const game = { tool: 'command', supType: 'artillery', ciws: true, pending: [], marks: [], beacons: [], survivors: [], shots: 0, fx: [], lost: 0 };
-const fxArr = new Float32Array(MAX_FX * 4);
+const fxArr = new Float32Array(MAX_FX * 8);
+// game.fx：[x, y, 寬, 開始時間, 高度（打在屋頂上的砲彈；沒有＝地面）]
 function buildFx() {
   game.fx = game.fx.filter((f) => sim.time - f[3] < 1.2);
-  game.fx.slice(-MAX_FX).forEach((f, k) => fxArr.set(f, k * 4));
-  return fxArr.subarray(0, Math.min(MAX_FX, game.fx.length) * 4);
+  game.fx.slice(-MAX_FX).forEach((f, k) => { fxArr.set(f.slice(0, 4), k * 8); fxArr[k * 8 + 4] = f[4] || 0; });
+  return fxArr.subarray(0, Math.min(MAX_FX, game.fx.length) * 8);
 }
 // 避難所位置（依離市中心遠近排序；測試用 survivors[0] 當屍潮聚集點）
 game.survivors = shelters.slice().sort((a, b) => Math.hypot(a.sx - map.downtown.x, a.sy - map.downtown.y) - Math.hypot(b.sx - map.downtown.x, b.sy - map.downtown.y)).map((d) => [d.sx, d.sy]);
@@ -3943,11 +4270,8 @@ function updateGame(dt) {
   const sdt = dt * sim.speed;
   for (const p of game.pending) p.t -= sdt;
   for (const p of game.pending.filter((p) => p.t <= 0)) {
-    sim.strikesOnce.push([p.x, p.y, p.r, 0.93]);
     game.marks.push({ type: 2, x: p.x, y: p.y, r: p.r * 1.1, life: 0.18, max: 0.18 });
-    game.fx.push([p.x, p.y, p.r * 1.9, sim.time]);
-    fxExplosion(p.x, p.y, p.r * 1.9);
-    game.marks.push({ type: 3, x: p.x, y: p.y, r: p.r * 0.8, life: 90, max: 90 });
+    detonate(p.x, p.y, p.r, 0.93);
   }
   game.pending = game.pending.filter((p) => p.t > 0);
   // 準星：直接操控時跟著滑鼠
@@ -4136,7 +4460,10 @@ $('regionName').textContent = `· ${REGION.name}（${CAMPAIGN.current + 1}/${REG
 // ----- 主迴圈 -----
 cam.x = fob.x; cam.y = fob.y + 140; cam.ppm = 6;
 let last = performance.now();
+// GPU 還有 3 幀沒做完就先跳過這次（不更新、不送新工作）：慢的 GPU（例如軟體算繪）不會越積越多、讀回的資料落後好幾秒
+let inFlight = 0;
 function loop(now) {
+  if (inFlight >= 3) { requestAnimationFrame(loop); return; }
   const dt = clamp((now - last) / 1000, 0, 0.1);   // rAF 時間戳可能早於初始化時的 performance.now()，第一幀會是負的
   last = now;
   fps = lerp(fps, 1 / Math.max(dt, 1e-4), 0.05);
@@ -4146,6 +4473,7 @@ function loop(now) {
   cam.x += shx; cam.y += shy;
   updateDistrictColors();
   encodeFrame(dt, buildMarks(dt), buildFx(), buildUnits());
+  inFlight++; device.queue.onSubmittedWorkDone().then(() => inFlight--, () => inFlight--);
   cam.x -= shx; cam.y -= shy;
   placeLabels();
   sfx.tick(dt);
@@ -4170,7 +4498,7 @@ window.GAME = {
     units: units.map((u) => ({ id: u.id, type: u.type, x: +u.x.toFixed(1), y: +u.y.toFixed(1), z: +u.z.toFixed(1), men: u.men, hp: +u.hp.toFixed(0), hang: u.hang, firing: u.firing })) }),
   view(x, y, ppm) { cam.x = x; cam.y = y; if (ppm) cam.ppm = ppm; return true; },
   debugRescue(n) { rescued += n; return rescued; },
-  findPath: (a, b, c, d) => findPath(a, b, c, d), tileAt: (x, y) => map.t[(y | 0) * WN + (x | 0)],
+  findPath: (a, b, c, d, r) => findPath(a, b, c, d, r), tileAt: (x, y) => map.t[(y | 0) * WN + (x | 0)],
   blockades, roadCandidates, get pathDangerCells() { let n = 0; for (const v of pathDanger) if (v > 0) n++; return n; },
   // 測試：Nexus 立刻挑某一類目標（預警時間可縮短）
   forceNexus(kind, warn = NEXUS_WARN) { const c = nexusCandidates().find((t) => t.kind === kind); if (!c) return null; Object.assign(nexus, { target: c, phase: 'warn', warnT: warn, t: 0 }); logEvent(`⚠ NEXUS 集結屍潮：${c.name}，約 ${warn} 分鐘後抵達`, 'bad'); return { name: c.name, x: c.x, y: c.y }; },
@@ -4181,6 +4509,22 @@ window.GAME = {
   op, endOperation, campaign: CAMPAIGN, region: REGION, regions: REGIONS, showCampaignMap, sprites: SPRITES, sfx, dayNight, nexus, nexusCandidates, districts, events, clockText, supply, outposts, get rescued() { return rescued; }, deploy, placeOutpost, orderAt, support, callSupport, setSupport, strike, addBeacon, setSpeed, setTool, setAlt: setAltSel, setAgents: (n) => setAgents(n),
   // 戰鬥特效（M16）：粒子數、殘骸數、某類地面標記數、這幀的單位實例數
   fx: { get particles() { return nParts; }, get wrecks() { return wrecks.length; }, marks: (type) => game.marks.filter((m) => m.type === type).length, get instances() { return game.unitInstances; }, maxParticles: MAX_PARTS, maxInstances: MAX_UNITS, explode: (x, y, size) => fxExplosion(x, y, size) },
+  // 碰撞與命中對齊（M17）
+  collide: { clearAt, roofAt, radius: (id) => { const u = unitById(id); return u ? unitRadius(u) : 0; }, UR, ray: rayHitBuilding, los: groundLos, perf: unitPerf, buildMs: () => clearanceMs,
+    // 所有地面單位離建築／牆／水最深穿進去多少（m；0＝沒穿）
+    penetration() { let w = 0; for (const u of units) { if (isAir(u)) continue; const r = UR[u.type]; for (let ty = Math.floor(u.y - r); ty <= Math.floor(u.y + r); ty++) for (let tx = Math.floor(u.x - r); tx <= Math.floor(u.x + r); tx++) { if (!hardAt(tx, ty)) continue; const d = Math.hypot(u.x - clamp(u.x, tx, tx + 1), u.y - clamp(u.y, ty, ty + 1)); w = Math.max(w, unitRadius(u) - d); } } return w; },
+    // 單位兩兩最深重疊多少（m）
+    overlap() { let w = 0; for (let i = 0; i < units.length; i++) for (let j = i + 1; j < units.length; j++) { const a = units[i], b = units[j]; if (isAir(a) !== isAir(b) || (isAir(a) && Math.abs(a.z - b.z) > 8)) continue; w = Math.max(w, unitRadius(a) + unitRadius(b) - Math.hypot(a.x - b.x, a.y - b.y)); } return w; } },
+  // 測試：在 (x, y) 半徑 r 內（避開建築）放 n 隻喪屍
+  spawnZombies(x, y, n, r) {
+    const a = new Float32Array(n * 4), inf = new Uint32Array(n * 2);
+    let k = 0;
+    for (let g = 0; k < n && g < n * 20; g++) { const ang = Math.random() * 6.2832, d = Math.sqrt(Math.random()) * r, px = x + Math.cos(ang) * d, py = y + Math.sin(ang) * d; if (hardAt(px, py)) continue; a.set([px, py, 0, 0], k * 4); inf.set([1 | (((Math.random() * 256) | 0) << 8), 0], k * 2); k++; }
+    k = Math.min(k, MAX_AGENTS - sim.n);
+    device.queue.writeBuffer(agentsB, sim.n * 16, a, 0, k * 4); device.queue.writeBuffer(infoB, sim.n * 8, inf, 0, k * 2);
+    sim.n += k; return k;
+  },
+  hits: hitStats, get tracers() { return tracers.map((t) => [...t]); }, detonate: (x, y, r, z) => detonate(x, y, r, 0.9, z || 0),
   select(ids) { sel.clear(); for (const id of ids) sel.add(id); return [...sel]; },
   get selection() { return [...sel]; },
   order: (x, y) => orderMove(x, y),

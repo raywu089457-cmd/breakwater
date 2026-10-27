@@ -36,11 +36,11 @@ function updateNests(sdt) {
     if (n.firing) {
       n.aimX = n.x + cx; n.aimY = n.y + cy; n.face = Math.atan2(cy, cx);
       useSupply(NEST.use * sdt);
-      if (Math.random() < sdt * 9) tracers.push([n.x, n.y, 1.2, n.aimX + (Math.random() - 0.5) * 4, n.aimY + (Math.random() - 0.5) * 4, 0.6, 0.07, 0]);
+      if (Math.random() < sdt * 5) missShot(n.x, n.y, 1.2, n, 2, true);   // 打死的那幾發由擊殺紀錄畫（nestShotAt）
     }
     n.hp -= contact * NEST.bite * sdt;
     if (n.hp <= 0) {
-      explodeAt(n.x, n.y, 5, 0.6, 12);
+      explodeAt(n.x, n.y, 5, 0.6);
       logEvent(`機槍堡 ${n.id} 被屍潮淹沒`, 'bad');
       game.lost++;
       nests.splice(k, 1);
@@ -50,7 +50,7 @@ function updateNests(sdt) {
 function nestZones(z) {
   for (let k = 0; k < NEST.max; k++) {
     const n = nests[k], i = NEST.zone0 + k;
-    z[i] = n && n.firing ? [n.x, n.y, NEST.r, Math.min(4, NEST.rate / Math.max(sim.zoneCounts[i], 1))] : [0, 0, 0, 0];
+    z[i] = n && n.firing ? [n.x, n.y, -NEST.r, Math.min(4, NEST.rate / Math.max(sim.zoneCounts[i], 1))] : [0, 0, 0, 0];
   }
 }
 function nestTargets() { return nests.filter((n) => n.firing).map((n) => [n.x, n.y, 5, 60]); }
