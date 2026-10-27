@@ -31,6 +31,7 @@ function callSupport(type, x, y, x2, y2) {
 function boom(x, y, r, lethal, fx, shake) {
   sim.strikesOnce.push([x, y, r, lethal]);
   game.fx.push([x, y, fx, sim.time]);
+  fxExplosion(x, y, fx);
   game.marks.push({ type: 3, x, y, r: r * 0.75, life: 90, max: 90 });
   support.shake = Math.max(support.shake, shake);
   for (const u of [...units]) {
@@ -40,7 +41,7 @@ function boom(x, y, r, lethal, fx, shake) {
       let lost = 0;
       for (let k = 0; k < u.men; k++) {
         const [ox, oy] = soldierOffset(u, k), dd = Math.hypot(u.x + ox - x, u.y + oy - y);
-        if (dd < r && Math.random() < lethal * (1 - dd / r)) lost++;
+        if (dd < r && Math.random() < lethal * (1 - dd / r)) { lost++; fxSoldierDown(u.x + ox, u.y + oy); }
       }
       if (lost) { u.men -= lost; game.lost += lost; game.friendly = (game.friendly || 0) + lost; if (u.men <= 0) removeUnit(u); }
     } else if (u.type === 'tank' && d < r) { u.hp -= 900 * (1 - d / r); game.friendly = (game.friendly || 0) + 1; }

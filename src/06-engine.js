@@ -83,7 +83,7 @@ const indirectB = buf(16, GBU.INDIRECT | GBU.STORAGE | GBU.COPY_DST | GBU.COPY_S
 const bldData = new Float32Array(map.buildings.length * 8);
 map.buildings.forEach((b, k) => bldData.set([b[0], b[1], b[2], b[3], b[4], b[5], 0, 0], k * 8));
 const bldB = buf(bldData.byteLength, GBU.STORAGE, bldData);
-const MAX_MARKS = 256;
+const MAX_MARKS = 512;
 const markB = buf(MAX_MARKS * 32, GBU.STORAGE | GBU.COPY_DST);
 const blitU = buf(16, GBU.UNIFORM | GBU.COPY_DST);
 const ctrRead = device.createBuffer({ size: CTR_WORDS * 4, usage: GBU.MAP_READ | GBU.COPY_DST });
@@ -162,7 +162,7 @@ function updatePileTiles() {
   for (const t of set) if (ptileN < MAX_PTILES) ptileArr[ptileN++] = t;
   if (ptileN) device.queue.writeBuffer(ptileB, 0, ptileArr, 0, ptileN);
 }
-const MAX_UNITS = 512;
+const MAX_UNITS = 4096;   // 單位＋支援＋粒子（粒子池 1600）
 const unitB = buf(MAX_UNITS * 48, GBU.STORAGE | GBU.COPY_DST);
 const unitBG = bg(unitP, [renderU, unitB, atlasTex]);
 const cullBG = bg(cullP, [renderU, agentsB, infoB, visibleB, indirectB]);

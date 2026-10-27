@@ -54,6 +54,9 @@ function buildMarks(dt) {
   game.marks = game.marks.filter((m) => (m.life -= dt * (sim.speed ? 1 : 0)) > 0);
   for (const m of game.marks) if (m.type === 3) push(m.x, m.y, m.r, 3, [0.05, 0.04, 0.035], Math.min(1, m.life / 20) * 0.8);
   for (const m of game.marks) if (m.type === 2) push(m.x, m.y, m.r, 2, [1, 0.75, 0.35], m.life / m.max);
+  for (const m of game.marks) if (m.type === 6) push(m.x, m.y, m.r, 6, [0.3, 0.03, 0.03], Math.min(1, m.life / 20) * 0.85);
+  for (const m of game.marks) if (m.type === 4) { const k = 1 - m.life / m.max; push(m.x, m.y, m.r * Math.sqrt(k) + 0.5, 4, [1, 0.85, 0.55], (1 - k) * 0.9); }
+  for (const m of game.marks) if (m.type === 5) { const k = m.life / m.max; push(m.x, m.y, m.r * (0.3 + 0.7 * k), 5, m.c, Math.min(1, k * 1.6)); }
   for (const p of game.pending) push(p.x, p.y, p.r, 1, [1, 0.35, 0.2], p.t / p.t0);
   push(fob.x, fob.y, 70, 0, [0.35, 0.75, 1], 1);
   if (game.ciws) push(fob.x, fob.y, 118, 0, [0.3, 0.55, 0.9], 0.6);
@@ -77,7 +80,10 @@ function buildUnits() {
   const pushI = (a, b, c) => { if (n < MAX_UNITS) { unitArr.set(a, n * 12); unitArr.set(b, n * 12 + 4); unitArr.set(c, n * 12 + 8); n++; } };
   pushSupportInstances(pushI);
   pushNestInstances(pushI);
-  pushUnitInstances((a, b, c) => { if (n < MAX_UNITS) { unitArr.set(a, n * 12); unitArr.set(b, n * 12 + 4); unitArr.set(c, n * 12 + 8); n++; } });
+  pushWrecks(pushI);
+  pushUnitInstances(pushI);
+  pushParticles(pushI);
+  game.unitInstances = n;
   return unitArr.subarray(0, n * 12);
 }
 
@@ -88,12 +94,13 @@ function updateGame(dt) {
     sim.strikesOnce.push([p.x, p.y, p.r, 0.93]);
     game.marks.push({ type: 2, x: p.x, y: p.y, r: p.r * 1.1, life: 0.18, max: 0.18 });
     game.fx.push([p.x, p.y, p.r * 1.9, sim.time]);
+    fxExplosion(p.x, p.y, p.r * 1.9);
     game.marks.push({ type: 3, x: p.x, y: p.y, r: p.r * 0.8, life: 90, max: 90 });
   }
   game.pending = game.pending.filter((p) => p.t > 0);
   // 準星：直接操控時跟著滑鼠
   if (control && aim.sx >= 0) { const r = canvas.getBoundingClientRect(); [aim.x, aim.y] = screenToGround((aim.sx - r.left) / r.width, (aim.sy - r.top) / r.height); }
-  if (sdt > 0) { updateUnits(Math.min(sdt, 0.15)); updateSupport(Math.min(sdt, 0.15)); updateDistricts(Math.min(sdt, 0.15)); updateLogistics(Math.min(sdt, 0.15)); updateNests(Math.min(sdt, 0.15)); updateNexus(Math.min(sdt, 0.15)); updateQuarantine(Math.min(sdt, 0.15)); updateCampaign(Math.min(sdt, 0.15)); updateAutosave(Math.min(sdt, 0.15)); updateWalls(Math.min(sdt, 0.15)); }
+  if (sdt > 0) { updateUnits(Math.min(sdt, 0.15)); updateSupport(Math.min(sdt, 0.15)); updateDistricts(Math.min(sdt, 0.15)); updateLogistics(Math.min(sdt, 0.15)); updateNests(Math.min(sdt, 0.15)); updateNexus(Math.min(sdt, 0.15)); updateQuarantine(Math.min(sdt, 0.15)); updateCampaign(Math.min(sdt, 0.15)); updateAutosave(Math.min(sdt, 0.15)); updateWalls(Math.min(sdt, 0.15)); updateCombatFx(Math.min(sdt, 0.15)); }
   rebuildSimInputs();
   if (control) {
     // 鏡頭跟著被操控的單位
@@ -320,6 +327,8 @@ window.GAME = {
   listSaves, slots: SLOTS, get autoT() { return autoT; }, set autoT(v) { autoT = v; },
   nests, placeNest, removeNestAt, quarantine, setQPolicy, queueLen, qEnqueue(n, inf, turnIn, dk = 1) { quarantineEnqueue(n, Array.from({ length: inf }, () => sim.time + turnIn), dk); return queueLen(); }, saveGame, requestLoad, saveInfo, async sampleAgents(k = 64) { return [...new Float32Array(await readGpu(agentsB, k * 16))]; }, async sampleInfo(k = 64) { return [...new Uint32Array(await readGpu(infoB, k * 8))]; },
   op, endOperation, campaign: CAMPAIGN, region: REGION, regions: REGIONS, showCampaignMap, sprites: SPRITES, sfx, dayNight, nexus, nexusCandidates, districts, events, clockText, supply, outposts, get rescued() { return rescued; }, deploy, placeOutpost, orderAt, support, callSupport, setSupport, strike, addBeacon, setSpeed, setTool, setAlt: setAltSel, setAgents: (n) => setAgents(n),
+  // 戰鬥特效（M16）：粒子數、殘骸數、某類地面標記數、這幀的單位實例數
+  fx: { get particles() { return nParts; }, get wrecks() { return wrecks.length; }, marks: (type) => game.marks.filter((m) => m.type === type).length, get instances() { return game.unitInstances; }, maxParticles: MAX_PARTS, maxInstances: MAX_UNITS, explode: (x, y, size) => fxExplosion(x, y, size) },
   select(ids) { sel.clear(); for (const id of ids) sel.add(id); return [...sel]; },
   get selection() { return [...sel]; },
   order: (x, y) => orderMove(x, y),

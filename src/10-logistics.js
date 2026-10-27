@@ -59,6 +59,7 @@ function orderAt(x, y) {
     else { u.mission = null; u.phase = null; u.landed = false; if (isAir(u) && u.tz < 15) u.tz = 40; rest.push(u.id); }
   }
   if (rest.length) orderMove(x, y, rest);
+  if (list.length) fxOrderPing(x, y, list.length > rest.length);
   return list.length;
 }
 function routeTo(u, x, y) {

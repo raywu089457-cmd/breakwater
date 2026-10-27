@@ -156,6 +156,7 @@ function spawnZombieAt(x, y) {
 function explodeAt(x, y, r, lethal, fxSize) {
   sim.strikesOnce.push([x, y, r, lethal]);
   game.fx.push([x, y, fxSize, sim.time]);
+  fxExplosion(x, y, fxSize);
   game.marks.push({ type: 3, x, y, r: r * 0.8, life: 60, max: 60 });
 }
 // 畫面上的高度：直升機實際高度壓縮顯示（40 m 畫成 16 m），不然戰術視角下會飛出畫面；物理照用實際高度
@@ -172,6 +173,9 @@ function updateUnits(sdt) {
     const cx = inr ? P[b + 2] / inr - 64 : 0, cy = inr ? P[b + 3] / inr - 64 : 0;
     const maxPile = P[b + 4] / 100;
     const ctl = control === u;
+    // 受擊閃白：血量每掉 4% 閃一下（被啃、被炸都算）
+    u.hurt = Math.max(0, (u.hurt || 0) - sdt);
+    if (t.hp) { const st = Math.ceil(u.hp / (t.hp * 0.04)); if (u.hpStep != null && st < u.hpStep) u.hurt = 0.12; u.hpStep = st; }
     // --- 移動 ---
     let mvx = 0, mvy = 0;
     if (isAir(u)) {
@@ -222,6 +226,11 @@ function updateUnits(sdt) {
       explodeAt(ex, ey, 6, 0.9, 13);
       tracers.push([u.x + Math.cos(u.face) * 5, u.y + Math.sin(u.face) * 5, 2.2, ex, ey, 0.5, 0.08, 1]);
       game.fx.push([u.x + Math.cos(u.face) * 5.5, u.y + Math.sin(u.face) * 5.5, 4, sim.time]);
+      // 砲口爆風：一團亮光＋往前噴的煙，車身底下揚塵
+      const mx = u.x + Math.cos(u.face) * 6, my = u.y + Math.sin(u.face) * 6;
+      fxMuzzle(mx, my, 2.3, true);
+      for (let k = 0; k < 5; k++) emit(mx, my, 2.2, Math.cos(u.face) * rr(3, 8) + rr(-1.5, 1.5), Math.sin(u.face) * rr(3, 8) + rr(-1.5, 1.5), rr(0.5, 1.5), rr(1, 1.8), 1.2, 3.5, 0.5, 0.48, 0.44, 0.6, 0, 2);
+      for (let k = 0; k < 6; k++) { const a = Math.random() * 6.2832; emit(u.x + Math.cos(a) * 3, u.y + Math.sin(a) * 3, 0.3, Math.cos(a) * 5, Math.sin(a) * 5, 0.3, 0.7, 1, 2.6, 0.55, 0.5, 0.42, 0.45, 0, 2); }
       u.fireT = ctl ? 2.5 : t.reload;
     }
     // 曳光彈（純畫面）
@@ -229,9 +238,14 @@ function updateUnits(sdt) {
       const shooters = u.type === 'squad' ? u.men : u.type === 'tank' ? 1 : 2;
       const n = Math.random() < shooters * sdt * 6 ? 1 : 0;
       for (let k = 0; k < n; k++) {
-        const r = u.type === 'squad' ? 3 : 1.5, z0 = isAir(u) ? visZ(u) : u.type === 'tank' ? 2.4 : 1.3;
-        const ox = u.type === 'squad' ? (Math.random() - 0.5) * 6 : 0, oy = u.type === 'squad' ? (Math.random() - 0.5) * 3 : 0;
-        tracers.push([u.x + ox, u.y + oy, z0, u.aimX + (Math.random() - 0.5) * r * 2, u.aimY + (Math.random() - 0.5) * r * 2, 0.8, 0.07, 0]);
+        const r = u.type === 'squad' ? 3 : 1.5, z0 = isAir(u) ? visZ(u) : u.type === 'tank' ? 2.4 : 1.25;
+        // 步兵：從隨便一個士兵的槍口射出；其他：從車身／機身
+        const [ox, oy] = u.type === 'squad' ? soldierOffset(u, (Math.random() * u.men) | 0) : [0, 0];
+        const mx = u.x + ox + Math.cos(u.face) * (u.type === 'squad' ? 0.7 : 2), my = u.y + oy + Math.sin(u.face) * (u.type === 'squad' ? 0.7 : 2);
+        const hx = u.aimX + (Math.random() - 0.5) * r * 2, hy = u.aimY + (Math.random() - 0.5) * r * 2;
+        tracers.push([mx, my, z0, hx, hy, 0.8, 0.07, 0]);
+        fxMuzzle(mx, my, z0, false);
+        fxImpact(hx, hy);
       }
     }
     // --- 被咬 / 被抓 ---
@@ -240,13 +254,14 @@ function updateUnits(sdt) {
       while (u.dmg >= 100 && u.men > 0) {
         u.dmg -= 100; u.men--;
         const off = soldierOffset(u, u.men);
+        fxSoldierDown(u.x + off[0], u.y + off[1]); u.hurt = 0.25;
         if (Math.random() < 0.7) spawnZombieAt(u.x + off[0], u.y + off[1]);   // 被咬的變成喪屍
         game.lost = (game.lost || 0) + 1;
       }
       if (u.men <= 0) { removeUnit(u); continue; }
     } else if (u.type === 'tank' || u.type === 'truck') {
       u.hp -= contact * t.bite * sdt;
-      if (u.hp <= 0) { explodeAt(u.x, u.y, 9, 0.95, 22); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
+      if (u.hp <= 0) { explodeAt(u.x, u.y, 9, 0.95, 22); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
     } else {
       u.reach = maxPile + 2.7; u.crowd = contact;
       u.danger = u.z < u.reach + 3 && contact > 6;
@@ -256,7 +271,7 @@ function updateUnits(sdt) {
       } else if (u.hang > 0 && u.z > u.reach + 1.5 && Math.random() < 1.2 * sdt) u.hang--;
       u.hp -= u.hang * 2.5 * sdt;
       if (u.flash > 0) u.flash -= sdt;
-      if ((u.z <= 0.5 && !u.landed) || u.hp <= 0) { explodeAt(u.x, u.y, 11, 0.95, 26); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
+      if ((u.z <= 0.5 && !u.landed) || u.hp <= 0) { explodeAt(u.x, u.y, 11, 0.95, 26); addWreck(u); game.lost = (game.lost || 0) + 1; cargoLost(u); removeUnit(u); continue; }
     }
   }
   for (let k = tracers.length - 1; k >= 0; k--) if ((tracers[k][6] -= sdt) <= 0) tracers.splice(k, 1);
@@ -317,20 +332,20 @@ function unitProbeSlots() {
 function pushUnitInstances(push) {
   const ss = SPRITES.soldier, ts = SPRITES.tank;
   const sl = pickLod(cam.ppm, ss, 1.85), tl = pickLod(cam.ppm, ts, 7.4), zl = pickLod(cam.ppm);
-  const HELI_LEN = 16;
   for (const u of units) {
     if (isAir(u)) {
-      const hs = (u.type === 'transport' && SPRITES.transport) || SPRITES.heli, hh = (HELI_LEN * hs.cellH) / hs.cellW, hl = pickLod(cam.ppm, hs, hh);
+      const hs = (u.type === 'transport' && SPRITES.transport) || SPRITES.heli, hw = vehW(u.type === 'transport' && SPRITES.transport ? 'transport' : 'heli', hs), hh = (hw * hs.cellH) / hs.cellW, hl = pickLod(cam.ppm, hs, hh);
       push([u.x, u.y, 0.08, 11 + u.z * 0.08], [6 + u.z * 0.05, 0, 0, 1], [0, 0, clamp(0.45 - u.z / 120, 0.12, 0.45), 0]);
       for (let j = 0; j < Math.min(u.hang, 8); j++) {
         const ox = ((j % 4) - 1.5) * 1.3, oy = (j < 4 ? -1 : 1) * 1.1;
         push([u.x + ox, u.y + oy, visZ(u) - 1.4 - (j >= 4 ? 0.9 : 0), (1.95 * zl.cw) / zl.ch], [1.95, zl.x + ((Math.floor(sim.time * 6) + j) % 4) * zl.cw, zl.y + 3 * zl.ch, 3], [zl.cw, zl.ch, 1, 0]);
       }
-      push([u.x, u.y, visZ(u), HELI_LEN], [hh, hl.x + (u.dir % 4) * hl.cw, hl.y + Math.floor(u.dir / 4) * hl.ch, 0], [hl.cw, hl.ch, 1, u.flash > 0 ? 2 : 0]);
+      push([u.x, u.y, visZ(u), hw], [hh, hl.x + (u.dir % 4) * hl.cw, hl.y + Math.floor(u.dir / 4) * hl.ch, 0], [hl.cw, hl.ch, 1, (u.flash > 0 ? 2 : 0) | (u.hurt > 0 ? 8 : 0)]);
       push([u.x, u.y, visZ(u) + 1.2, 15], [15, 0, 0, 2], [0, 0, 0.9, 0]);
     } else if (u.type === 'tank' || u.type === 'truck') {
-      const vs = (u.type === 'truck' && SPRITES.truck) || ts, w = u.type === 'truck' ? 9 : 11, h = (w * vs.cellH) / vs.cellW, vl = pickLod(cam.ppm, vs, h);
-      push([u.x, u.y, 0.6, w], [h, vl.x + (u.dir % 4) * vl.cw, vl.y + Math.floor(u.dir / 4) * vl.ch, 0], [vl.cw, vl.ch, 1, u.hp < 250 && Math.sin(sim.time * 10) > 0 ? 2 : 0]);
+      const vs = (u.type === 'truck' && SPRITES.truck) || ts, w = vehW(u.type === 'truck' && SPRITES.truck ? 'truck' : 'tank', vs), h = (w * vs.cellH) / vs.cellW, vl = pickLod(cam.ppm, vs, h);
+      push([u.x, u.y, 0.08, w * 0.8], [h * 0.75, 0, 0, 1], [0, 0, 0.35, 0]);   // 車底影子
+      push([u.x, u.y, 0.6, w], [h, vl.x + (u.dir % 4) * vl.cw, vl.y + Math.floor(u.dir / 4) * vl.ch, 0], [vl.cw, vl.ch, 1, (u.hp < 250 && Math.sin(sim.time * 10) > 0 ? 2 : 0) | (u.hurt > 0 ? 8 : 0)]);
     } else {
       const w = (1.85 * sl.cw) / sl.ch;
       const row4 = angTo4(u.face);
@@ -339,11 +354,16 @@ function pushUnitInstances(push) {
         let row = row4, col = 0, flip = 0;
         if (u.firing && ((Math.floor(sim.time * 12) + k) & 1)) { row = 2; col = 4; flip = Math.cos(u.face) < 0 ? 1 : 0; }
         else if (u.moving) col = (Math.floor(u.walk * 1.6) + k) & 3;
-        push([u.x + ox, u.y + oy, 0, w], [1.85, sl.x + col * sl.cw, sl.y + row * sl.ch, 5], [sl.cw, sl.ch, 1, flip]);
+        push([u.x + ox, u.y + oy, 0, w], [1.85, sl.x + col * sl.cw, sl.y + row * sl.ch, 5], [sl.cw, sl.ch, 1, flip | (u.hurt > 0 ? 8 : 0)]);
       }
     }
   }
-  for (const t of tracers) push([t[0], t[1], t[2], t[7] ? 2.2 : 1.2], [t[3], t[4], t[5], 4], t[7] ? [1, 0.85, 0.5, 1] : [1, 0.9, 0.45, 0.85]);
+  // 曳光彈：外面一圈淡淡的光暈＋亮芯
+  for (const t of tracers) {
+    push([t[0], t[1], t[2], t[7] ? 5 : 3], [t[3], t[4], t[5], 4], t[7] ? [1, 0.6, 0.25, 0.35] : [1, 0.7, 0.3, 0.25]);
+    push([t[0], t[1], t[2], t[7] ? 2.2 : 1.2], [t[3], t[4], t[5], 4], t[7] ? [1, 0.95, 0.75, 1] : [1, 0.95, 0.6, 0.95]);
+  }
+  pushUnitOverlays(push);
 }
 function unitMarks(push) {
   for (const u of units) {
@@ -356,6 +376,28 @@ function unitMarks(push) {
     if (isAir(u) && (u.danger || u.hang)) push(u.x, u.y, 9, 1, [1, 0.25, 0.2], 0.5 + 0.5 * Math.sin(sim.time * 8));
   }
   if (control && aim.firing === false) push(aim.x, aim.y, 1.5, 0, [1, 0.8, 0.3], 0.8);
+}
+// 選取／受傷單位頭上的血條（步兵班＝剩幾人的格子）＋選取單位的虛線路徑
+// 種類 7 血條：(x, y, z, 寬m) (高m, 填滿比例, 格數, 7) (r, g, b, a)；種類 8 虛線（跟 4 一樣，但會流動）
+function pushUnitOverlays(push) {
+  const ppm = cam.ppm, up = cam.up;
+  if (ppm < 2) return;
+  for (const u of units) {
+    const t = UT[u.type], picked = sel.has(u.id);
+    if (picked && control !== u) {
+      const pts = isAir(u) ? (Math.hypot(u.tx - u.x, u.ty - u.y) > 4 ? [[u.tx, u.ty]] : []) : u.path.slice(0, 12);
+      let px = u.x, py = u.y;
+      for (const [qx, qy] of pts) { push([px, py, 0.25, 1], [qx, qy, 0.25, 8], u.mission ? [0.35, 0.9, 1, 0.7] : [0.45, 1, 0.5, 0.7]); px = qx; py = qy; }
+    }
+    const frac = u.type === 'squad' ? u.men / 8 : t.hp ? clamp(u.hp / t.hp, 0, 1) : 1;
+    if (!picked && frac >= 1) continue;
+    const lift = u.type === 'squad' ? 3.1 : isAir(u) ? 7 : 5.2, z0 = isAir(u) ? visZ(u) : u.type === 'squad' ? 0 : 0.6;
+    const bx = u.x + up[0] * lift, by = u.y + up[1] * lift, bz = z0 + up[2] * lift;
+    const w = 34 / ppm, h = 4.5 / ppm, e = 2 / ppm;
+    const c = frac > 0.6 ? [0.35, 0.95, 0.4, 1] : frac > 0.3 ? [1, 0.8, 0.25, 1] : [1, 0.3, 0.25, 1];
+    push([bx, by, bz, w + e], [h + e, 1, 1, 7], [0.05, 0.05, 0.05, 0.8]);
+    push([bx, by, bz, w], [h, frac, u.type === 'squad' ? 8 : 1, 7], c);
+  }
 }
 // 畫面像素 → 最近的單位（28 px 內）
 function pickUnit(px, py) {
