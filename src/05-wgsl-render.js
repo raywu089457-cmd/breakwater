@@ -331,6 +331,15 @@ struct MO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) 
     al = (step(abs(r - 0.96), w) + step(abs(r - i.b.w), w) + (step(abs(i.uv.x), w) + step(abs(i.uv.y), w)) * step(r, 0.25)) * pulse;
   }
   else if (typ == 2u) { al = smoothstep(1.0, 0.2, r) * i.b.w; }
+  else if (typ == 4u) { al = (step(abs(r - 0.94), w * 1.6) + 0.12 * step(r, 0.94)) * i.b.w; }   // 衝擊波圈
+  else if (typ == 5u) {   // 下令落點：圈＋四根往內的刻度＋中心點
+    let tick = (step(abs(i.uv.x), w * 1.2) + step(abs(i.uv.y), w * 1.2)) * step(0.5, r) * step(r, 0.95);
+    al = (step(abs(r - 0.95), w * 1.4) + tick + step(r, max(w * 2.0, 0.07))) * i.b.w;
+  }
+  else if (typ == 6u) {   // 血跡：不規則的一灘
+    let n = h21(floor(i.uv * 4.0) + i.a.xy) * 0.45 + h21(floor(i.uv * 9.0) + i.a.yx) * 0.25;
+    al = step(r, 0.35 + n) * i.b.w;
+  }
   else { al = step(r, 0.85 + 0.12 * h21(floor(i.uv * 10.0))) * (0.5 + 0.3 * h21(floor(i.uv * 7.0) + 3.0)) * i.b.w; }
   if (al < 0.01) { discard; }
   return vec4f(i.b.rgb, clamp(al, 0.0, 1.0));
@@ -370,7 +379,9 @@ struct FO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) 
 
 // 單位：每個實例 3 個 vec4 —— (x, y, z, 寬m) (高m, 圖集x, 圖集y, 種類) (格寬, 格高, 透明度, 旗標)
 // 種類 0 機身／載具（面向鏡頭、中心錨點）、1 地面影子、2 旋翼（水平圓盤）、3 吊掛的喪屍、4 曳光彈（a.xyz→b.xyz，a.w 像素寬，c＝顏色）、
-// 5 地面人物（腳底錨點、直立卡片深度，跟喪屍一樣）；旗標 bit0 左右翻、bit1 閃紅
+// 5 地面人物（腳底錨點、直立卡片深度，跟喪屍一樣）、6 粒子（面向鏡頭；b.x 形狀 0 火光 1 火星 2 煙，b.y 進度）、
+// 7 血條（面向鏡頭、永遠在最上層；b.y 填滿比例、b.z 格數）、8 流動虛線（同 4）；
+// 旗標 bit0 左右翻、bit1 閃紅、bit2 燒焦（殘骸）、bit3 受擊閃白
 const WGSL_UNITS = WGSL_RCOMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> U: R;
 @group(0) @binding(1) var<storage, read> un: array<vec4f>;
@@ -383,14 +394,25 @@ struct UO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) 
   let kind = u32(b.w);
   var wp: vec3f;
   var o: UO;
-  if (kind == 4u) {
+  if (kind == 4u || kind == 8u) {
     let c0 = U.vp * vec4f(a.xyz, 1.0); let c1 = U.vp * vec4f(b.xyz, 1.0);
     var d = (c1.xy - c0.xy) * U.view.xy;
+    let lenPx = length(d) * 0.5;
     d = select(vec2f(1.0, 0.0), normalize(d), dot(d, d) > 1e-6);
     let perp = vec2f(-d.y, d.x) * a.w / U.view.xy;
     var cp = mix(c0, c1, q.x);
     cp = vec4f(cp.xy + perp * (q.y - 0.5) * 2.0, cp.z - 0.0005, cp.w);
-    o.pos = cp; o.uv = q; o.b = b; o.c = c;
+    o.pos = cp; o.uv = vec2f(select(q.x, q.x * lenPx, kind == 8u), q.y); o.b = b; o.c = c;
+    return o;
+  }
+  if (kind == 6u) {
+    wp = a.xyz + U.right.xyz * (q.x - 0.5) * a.w + U.up.xyz * (q.y - 0.5) * a.w + U.back.xyz * 2.0;
+    o.pos = U.vp * vec4f(wp, 1.0); o.uv = q; o.b = b; o.c = c;
+    return o;
+  }
+  if (kind == 7u) {
+    wp = a.xyz + U.right.xyz * (q.x - 0.5) * a.w + U.up.xyz * (q.y - 0.5) * b.x + U.back.xyz * 40.0;
+    o.pos = U.vp * vec4f(wp, 1.0); o.uv = q; o.b = b; o.c = c;
     return o;
   }
   if (kind == 1u || kind == 2u) {
@@ -409,6 +431,34 @@ struct UO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) 
   let kind = u32(i.b.w);
   let flags = u32(i.c.w);
   if (kind == 4u) { return i.c; }
+  if (kind == 8u) {
+    if (fract((i.uv.x - U.misc.x * 14.0) / 7.0) > 0.55) { discard; }
+    return i.c;
+  }
+  if (kind == 6u) {
+    let p = (i.uv - 0.5) * 2.0;
+    let r = length(p);
+    let t = i.b.y;
+    let shape = u32(i.b.x);
+    if (shape == 1u) {   // 火星／血滴：小方塊，越飛越暗
+      return vec4f(mix(i.c.rgb, i.c.rgb * vec3f(0.55, 0.25, 0.2), t), i.c.a * (1.0 - t * 0.5));
+    }
+    if (shape == 2u) {   // 煙：雜訊邊的圓，越來越淡
+      let edge = 0.62 + 0.38 * h21(floor(i.uv * 5.0) + i.b.z * 7.0);
+      if (r > edge) { discard; }
+      let a = i.c.a * (1.0 - t) * (1.0 - t * 0.3) * (0.8 + 0.2 * (1.0 - r));
+      return vec4f(i.c.rgb * (1.05 - 0.25 * r), a);
+    }
+    if (r > 1.0) { discard; }   // 火光：亮芯＋外圈
+    let core = 1.0 - smoothstep(0.0, 0.6, r);
+    return vec4f(mix(i.c.rgb * vec3f(1.0, 0.75, 0.45), vec3f(1.0, 1.0, 0.9), core), i.c.a * (1.0 - t * t) * (0.55 + 0.45 * core));
+  }
+  if (kind == 7u) {
+    if (i.uv.x > i.b.y) { return vec4f(0.12, 0.12, 0.12, 0.85); }
+    let segs = i.b.z;
+    if (segs > 1.5 && fract(i.uv.x * segs) > 0.82) { return vec4f(0.05, 0.05, 0.05, 0.85); }
+    return vec4f(i.c.rgb * select(0.8, 1.0, i.uv.y > 0.45), i.c.a);
+  }
   if (kind == 1u) {
     let r = length(floor((i.uv - 0.5) * 24.0) / 12.0);
     if (r > 1.0) { discard; }
@@ -431,6 +481,8 @@ struct UO { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) 
   if (tx.a < 0.01) { discard; }
   var col = tx.rgb;
   if ((flags & 2u) != 0u && fract(U.misc.x * 6.0) < 0.5) { col = mix(col, vec3f(1.0, 0.2, 0.15), 0.45); }
+  if ((flags & 4u) != 0u) { col = col * vec3f(0.2, 0.18, 0.17) + vec3f(0.02); }
+  if ((flags & 8u) != 0u) { col = mix(col, vec3f(1.0, 0.96, 0.9), 0.6); }
   return vec4f(col, i.c.z);
 }
 `;

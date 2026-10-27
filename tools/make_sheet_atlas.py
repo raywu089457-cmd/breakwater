@@ -1,6 +1,7 @@
 """通用：l0veyou 綠幕表（rows x cols 格）→ 真像素圖集＋縮小層級（LOD）。
 
 用法：python -I tools/make_sheet_atlas.py <sheet> <out_prefix> --grid 2x4 --pitch 4.6 --colors 32 --anchor center|feet [--groups] [--keep-light]
+  加 --keyed＝跳過去背、直接重切 <out_prefix>-keyed.png（例：戰車側面圖被等分切斷時改用 --split gaps 重切）
 - 每格裁出主體，用「區塊中位數」縮到真像素，再全部共用一組色盤。
 - --anchor feet：腳底對齊格子底部（站立角色）；center：主體中心對齊格子中心（屍體、特效）。
 - --groups：依顏色分材質群組寫進 alpha（255 - g*8），遊戲用來換衣服顏色；沒加就是一般 alpha（255）。
@@ -17,8 +18,11 @@ from PIL import Image
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "_ext" / "sprite-gen"))
-from sprite_gen.frames.cutout import cutout  # noqa: E402
-from make_zombie_atlas import classify  # noqa: E402
+try:
+    from sprite_gen.frames.cutout import cutout  # noqa: E402
+    from make_zombie_atlas import classify  # noqa: E402
+except ImportError:   # 沒有 sprite-gen：只能用 --keyed 重切已去背的表（不能 --groups）
+    cutout = classify = None
 
 LOD_SCALES = (1.0, 0.71, 0.53, 0.39, 0.29, 0.21)
 
@@ -32,11 +36,14 @@ def main():
     ap.add_argument("--key", default="green", help="green 或 magenta 背景")
     ap.add_argument("--split", default="equal", help="equal 等分；gaps 依空白切（格子不等寬的表）")
     ap.add_argument("--min-component", type=int, default=12, help="移除小於這個像素數的碎屑（縮小後）")
+    ap.add_argument("--flip-v", default="", help="上下翻轉某些格（r,c;r,c…），生圖畫錯方向時補救")
+    ap.add_argument("--keyed", action="store_true", help="直接用已經去背的 <out_prefix>-keyed.png 重切（不重跑去背）")
     a = ap.parse_args()
     rows, cols = map(int, a.grid.split("x"))
     src, prefix = Path(a.sheet), Path(a.prefix)
     keyed_path = prefix.with_name(prefix.name + "-keyed.png")
-    cutout(src, keyed_path, key=a.key, decontam="auto")
+    if not a.keyed:
+        cutout(src, keyed_path, key=a.key, decontam="auto")
     full = np.array(Image.open(keyed_path).convert("RGBA"))
     FH, FW = full.shape[:2]
     P = a.pitch
@@ -113,6 +120,11 @@ def main():
                     out[lab == k] = 0
             ys2, xs2 = np.where(out[..., 3] > 0)
             frames.append(out[ys2.min():ys2.max() + 1, xs2.min():xs2.max() + 1])
+
+    for rc in filter(None, a.flip_v.split(";")):
+        r_, c_ = map(int, rc.split(","))
+        if frames[r_ * cols + c_] is not None:
+            frames[r_ * cols + c_] = frames[r_ * cols + c_][::-1].copy()
 
     allpx = np.concatenate([f[f[..., 3] > 0][:, :3] for f in frames if f is not None])
     q = Image.fromarray(allpx.reshape(1, -1, 3), "RGB").quantize(colors=a.colors, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
